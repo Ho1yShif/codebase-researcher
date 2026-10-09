@@ -1,0 +1,85 @@
+# Three services for support-triage-bot: Slack endpoint, the answer_question workflow, and the snapshot
+# refresh cron. Region is oregon because Sandboxes early access runs only there. No database.
+
+envVarGroups:
+  - name: support-triage-bot-shared
+    envVars:
+      - key: RENDER_API_KEY
+        sync: false
+      - key: RENDER_WORKSPACE_ID
+        # Optional when the key can see exactly one workspace.
+        sync: false
+
+services:
+  - type: web
+    name: support-triage-bot-api
+    runtime: node
+    region: oregon
+    # Paid instance: a free instance spins down and misses Slack's 3-second deadline.
+    plan: starter
+    buildCommand: pnpm install --frozen-lockfile
+    startCommand: pnpm start:api
+    healthCheckPath: /healthz
+    buildFilter:
+      paths: [src/api.ts, src/slack.ts, src/types.ts, config.ts, package.json, pnpm-lock.yaml]
+    envVars:
+      - key: API_TOKEN
+        generateValue: true
+      - key: SLACK_SIGNING_SECRET
+        sync: false
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: ALLOWED_CHANNEL_IDS
+        sync: false
+      - key: SLACK_CALLBACK_KEY
+        generateValue: true
+      - fromGroup: support-triage-bot-shared
+      - key: WORKFLOW_SLUG
+        fromService:
+          type: workflow
+          name: support-triage-bot-workflow
+          property: slug
+
+  - type: workflow
+    name: support-triage-bot-workflow
+    runtime: node
+    region: oregon
+    buildCommand: pnpm install --frozen-lockfile
+    startCommand: pnpm start:workflow
+    buildFilter:
+      paths: [src/**, sandbox/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
+    # Env groups aren't linked to workflow services, so the shared values are declared here directly.
+    envVars:
+      - key: RENDER_API_KEY
+        sync: false
+      - key: RENDER_WORKSPACE_ID
+        # Optional when the key can see exactly one workspace.
+        sync: false
+      - key: SANDBOX_PROVIDER
+        value: render
+      - key: MODEL_PROVIDER
+        value: anthropic
+      - key: MODEL
+        value: claude-opus-5
+      # Use a dedicated, spend-capped key: DNS still resolves inside Sandboxes.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SANDBOX_NETWORK_POLICY
+        value: allow-list
+
+  - type: cron
+    name: support-triage-bot-snapshots
+    runtime: node
+    region: oregon
+    plan: starter
+    schedule: "0 * * * *"
+    buildCommand: pnpm install --frozen-lockfile && pnpm build:runner
+    startCommand: pnpm refresh
+    buildFilter:
+      paths: [src/**, sandbox/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
+    envVars:
+      - fromGroup: support-triage-bot-shared
+      - key: SANDBOX_PROVIDER
+        value: render
+      - key: GITHUB_TOKEN
+        sync: false
