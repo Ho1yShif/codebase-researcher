@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildEvidenceUrl } from "../src/types.ts";
 import type { Evidence, FinalAnswer, RepoManifest } from "../src/types.ts";
-import { filterEvidence } from "../src/investigate.ts";
+import { filterEvidence } from "../src/tasks.ts";
 
 const sha = "a".repeat(40);
 const manifest: RepoManifest = {

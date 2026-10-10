@@ -2,33 +2,27 @@
 
 ## Architecture
 
-The system has three services, no database, and one shared concept (the named snapshot) that ties them together.
+The system has three services:
 
-**API** (`support-triage-bot-api`, web service) accepts questions over HTTP and optionally listens for Slack mentions. It does not run investigations itself. It starts a workflow run for each question and returns immediately, so Slack's 3-second acknowledgement deadline is met without background threads or queues.
+**API** (`code-investigator-api`, web service) accepts questions over HTTP and optionally listens for Slack mentions. It starts a workflow run for each question and returns immediately, so Slack's 3-second acknowledgement deadline is met without background threads or queues.
 
-**Workflow** (`support-triage-bot-workflow`, Render Workflow) defines one parent task (`answer_question`) and two subtasks (`investigate` and `deliver`). The parent task starts `investigate`, collects the result, and optionally starts `deliver` to POST the result to a callback URL. Render Workflows provide durable execution: the runtime retries failed subtasks, persists results, and makes the run's status and output queryable by ID. This is why there is no database. The workflow stores what a database would (the question's status, the reply, the trace ID), and the API reads it back through `getTaskRun`.
+**Workflow** (`code-investigator-workflow`, Render Workflow) defines one parent task (`answer_question`) and two subtasks (`investigate` and `deliver`). The parent task starts `investigate`, collects the result, and optionally starts `deliver` to POST the result to a callback URL.
 
-**Cron** (`support-triage-bot-snapshots`, hourly) resolves the current default-branch HEAD for each configured repository, clones them into a builder Sandbox, locks the filesystem down, and takes a named snapshot. It then prunes older snapshots, keeping the newest two. The snapshot name is a stable string set in `config.ts`, not a unique ID. Sandbox restore uses the same name, so the workflow always gets the latest available snapshot without coordinating with the cron.
+**Cron** (`code-investigator-snapshots`, hourly) resolves the current default-branch HEAD for each configured repository, clones them into a builder Sandbox, locks the filesystem down, and takes a named snapshot. It then prunes older snapshots, keeping the newest two. The snapshot name is a stable string set in `config.ts`. Sandbox restore uses the same name, so the workflow always gets the latest available snapshot.
 
-## Why no database
+// TODO: Diagram
 
-Render Workflows already provide the storage and retry semantics that a question lifecycle needs. The API issues a signed question ID that encodes the workflow run ID. Polling `GET /v1/questions/:id` reads the run's status and results from the workflow runtime. Callbacks are delivered by a retried subtask. There is nothing to persist beyond what the workflow already tracks, so adding a database would only add operational cost and a consistency boundary.
+## Core concepts [TODO - BETTER TITLE]
 
-Snapshot resolution works by name. The cron writes a snapshot called (for example) `support-triage-bot-corpus`; the workflow restores from the same name. The Sandbox API returns the newest available snapshot with that name. No coordination record is needed because the naming convention is the coordination.
-
-## Why a generic API with Slack as an adapter
-
-The core abstraction is a question (a transcript, an optional callback, and optional metadata) answered asynchronously. Slack is one consumer, but the same API serves any caller: a CLI, a web dashboard, a CI pipeline, or another bot. The Slack adapter translates between Slack's event model and the question API, but the investigation pipeline knows nothing about Slack.
+The core abstraction is a question (a transcript, an optional callback, and optional metadata) answered asynchronously. Slack is one consumer, but the same API can serve any caller: a CLI, a web dashboard, a CI pipeline, or another bot. The Slack adapter translates between Slack's event model and the question API, but the investigation pipeline knows nothing about Slack.
 
 This separation means the investigation logic does not depend on Slack's SDK, rate limits, or message formatting. It also means the Slack adapter can be turned off entirely (by omitting its env vars) without changing any other code.
 
-## Why a fresh Sandbox per question
+Each question gets its own Sandbox. Reusing a Sandbox across questions would let one investigation's side effects (files in scratch, environment changes, leftover processes) influence the next. A fresh restore from an immutable snapshot guarantees that every question starts from the same known state. It also simplifies cleanup: the Sandbox is terminated in a `finally` block, and any failure to clean up is bounded by the provider-side timeout.
 
-Reusing a Sandbox across questions would let one investigation's side effects (files in scratch, environment changes, leftover processes) influence the next. A fresh restore from an immutable snapshot guarantees that every question starts from the same known state. It also simplifies cleanup: the Sandbox is terminated in a `finally` block, and any failure to clean up is bounded by the provider-side timeout.
+The cost is restore latency (about 15 seconds). This is acceptable for a support use case where investigations take ~1-2 minutes.
 
-The cost is restore latency (about 15 seconds). This is acceptable for a support-triage use case where investigations take 45-140 seconds anyway.
-
-## Why an hourly unconditional rebuild
+## Cron: Hourly rebuild
 
 The cron runs every hour whether or not the repositories changed. This is simpler than webhook-driven builds and avoids the failure modes of webhook delivery (missed events, duplicate events, webhook secret rotation). An hourly cadence is frequent enough that investigations see commits within an hour of landing. It also keeps snapshots from expiring (Render's snapshot retention is time-based), so the bot stays available without monitoring snapshot age.
 
@@ -38,9 +32,9 @@ Building unconditionally means some builds are redundant (the same commits, the 
 
 The goal is to prevent the model (via the coding agent's tool calls) from reading secrets it should not have, modifying the repositories, or reaching services beyond its own API provider.
 
-**Filesystem isolation.** Repositories are cloned by a builder Sandbox with full egress. Before the snapshot, `lockdown.sh` transfers ownership to root, makes everything read-only, and gives the runner user write access only to a scratch directory. The runner binary (`node`) is installed as an execute-only copy, making the runner process non-dumpable: same-uid tool subprocesses cannot read its memory (which holds the model API key) through `/proc`.
+**Filesystem isolation.** Repositories are cloned by a builder Sandbox with full egress. Before the snapshot, the lockdown step in `src/sandbox/render/snapshot.ts` transfers ownership to root, makes everything read-only, and gives the runner user write access only to a scratch directory. The runner binary (`node`) is installed as an execute-only copy, making the runner process non-dumpable: same-uid tool subprocesses cannot read its memory (which holds the model API key) through `/proc`.
 
-**Credential separation.** Git tokens exist only during the builder's clone phase. They arrive as per-host files uploaded after the install phase (which runs npm and the runner self-test, both of which execute third-party code). After cloning, `scrub-credentials.sh` deletes the files and verifies that no token value appears in any git config, `.git/` directory, or global credential store. The snapshot is taken only after this verification passes. Per-question Sandboxes restored from the snapshot never see git tokens.
+**Credential separation.** Git tokens exist only during the builder's clone phase. They arrive as per-host files uploaded after the install phase (which runs npm and the runner self-test, both of which execute third-party code). After cloning, the credential scrub step deletes the files and verifies that no token value appears in any git config, `.git/` directory, or global credential store. The snapshot is taken only after this verification passes. Per-question Sandboxes restored from the snapshot never see git tokens.
 
 The model API key is delivered to each investigation Sandbox as a one-time file. The runner reads it, deletes it, and removes every provider key var from `process.env` before starting the agent. Tool subprocesses inherit a clean environment built from an allowlist, so even if the agent constructs a command that reads environment variables, it finds nothing.
 
@@ -55,6 +49,6 @@ This is accepted as a residual risk for several reasons: the API key is spend-ca
 ## What is deliberately out of scope
 
 - **Web UI.** The API is the interface. A UI can be built on top of it.
-- **Stored history.** Workflow runs are the history. A separate service could archive them, but the triage bot does not.
+- **Stored history.** Workflow runs are the history. A separate service could archive them, but the investigator does not.
 - **Write access.** The agent cannot modify repositories, open pull requests, or write to any external system. Its only output is the structured investigation result.
 - **Live-system inspection.** The agent reads checked-out source code, not running services, databases, or metrics. It answers "what does the code do," not "what is happening right now."

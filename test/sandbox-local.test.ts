@@ -1,152 +1,116 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RepoManifest, RunnerEvent } from "../src/types.ts";
+import type { RunnerEvent } from "../src/types.ts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { shq, SnapshotUnavailableError } from "../src/sandbox.ts";
-import { LocalProvider } from "../src/sandbox-local.ts";
+import { shq, SnapshotUnavailableError, type OpenSandbox } from "../src/sandbox/interface.ts";
+import { localSandboxes, type LocalConfig } from "../src/sandbox/local.ts";
 import { FAKE_RUNNER, makeRepo, runnerInput, runnerReport } from "./helpers.ts";
 
 let root: string;
-let provider: LocalProvider;
-let heads: RepoManifest["repos"];
-const profile = { name: "test", repos: [{ repository: "acme/widget" }, { repository: "acme/gadget" }] };
+let cfg: LocalConfig;
+let open: OpenSandbox;
+let commits: Record<string, string>;
 
 beforeAll(async () => {
-  root = await mkdtemp(join(tmpdir(), "triage-local-provider-"));
-  await makeRepo(join(root, "repos"), "acme/widget");
-  await makeRepo(join(root, "repos"), "acme/gadget");
-  provider = new LocalProvider({
+  root = await mkdtemp(join(tmpdir(), "triage-local-sandbox-"));
+  commits = {
+    "acme/widget": (await makeRepo(join(root, "repos"), "acme/widget")).commit,
+    "acme/gadget": (await makeRepo(join(root, "repos"), "acme/gadget")).commit,
+  };
+  cfg = {
+    profile: { name: "test", repos: [{ repository: "acme/widget" }, { repository: "acme/gadget" }] },
     reposRoot: join(root, "repos"),
     sandboxesRoot: join(root, "sandboxes"),
-    appDir: join(root, "app"),
     runnerCmd: `${shq(process.execPath)} ${shq(FAKE_RUNNER)}`,
-  });
-  heads = await provider.resolveHeads(profile);
+  };
+  open = localSandboxes(cfg);
 });
 
 afterAll(() => rm(root, { recursive: true, force: true }));
 
-async function createOne() {
-  await provider.buildSnapshot({ profile, heads, snapshotName: "support-triage-bot-test-local" });
-  return provider.createInvestigationSandbox({ snapshotName: "support-triage-bot-test-local" });
-}
-
-describe("LocalProvider", () => {
-  it("resolves heads from local checkouts without network", () => {
-    expect(heads.map((h) => [h.repository, h.branch])).toEqual([
-      ["acme/widget", "main"],
-      ["acme/gadget", "main"],
-    ]);
-    expect(heads.every((h) => /^[0-9a-f]{40}$/.test(h.commit))).toBe(true);
-  });
-
-  it("builds a snapshot and creates an investigation sandbox whose manifest matches the heads", async () => {
-    const built = await provider.buildSnapshot({ profile, heads, snapshotName: "support-triage-bot-test-local" });
-    expect(built.id).toBe("support-triage-bot-test-local");
-
-    const sbx = await provider.createInvestigationSandbox({ snapshotName: "support-triage-bot-test-local" });
-    expect(sbx.manifest.repos).toEqual(heads.map((h) => ({ ...h, path: join(root, "repos", h.repository) })));
-    expect(existsSync(sbx.layout.scratchDir)).toBe(true);
-  });
-
-  it("creates investigation sandboxes while the checkouts still match", async () => {
-    await provider.buildSnapshot({ profile, heads, snapshotName: "support-triage-bot-test-local" });
-    const a = await provider.createInvestigationSandbox({ snapshotName: "support-triage-bot-test-local" });
-    const b = await provider.createInvestigationSandbox({ snapshotName: "support-triage-bot-test-local" });
+describe("localSandboxes", () => {
+  it("builds the manifest from the checkouts and gives each sandbox its own scratch dir", async () => {
+    const a = await open("ignored");
+    const b = await open("ignored");
     expect(a.id).not.toBe(b.id);
-    for (const sbx of [a, b]) {
-      expect(sbx.manifest.repos).toEqual(heads.map((h) => ({ ...h, path: join(root, "repos", h.repository) })));
-      expect(existsSync(sbx.layout.scratchDir)).toBe(true);
+    expect(a.manifest.repos).toEqual([
+      { repository: "acme/widget", branch: "main", commit: commits["acme/widget"], path: join(root, "repos/acme/widget") },
+      { repository: "acme/gadget", branch: "main", commit: commits["acme/gadget"], path: join(root, "repos/acme/gadget") },
+    ]);
+    expect(a.reposRoot).toBe(cfg.reposRoot);
+    for (const sbx of [a, b]) expect(existsSync(sbx.scratchDir)).toBe(true);
+  });
+
+  it("treats a missing or dirty checkout as an unavailable snapshot", async () => {
+    const missing = localSandboxes({ ...cfg, profile: { name: "test", repos: [{ repository: "acme/nope" }] } });
+    await expect(missing("ignored")).rejects.toBeInstanceOf(SnapshotUnavailableError);
+
+    const stray = join(root, "repos/acme/gadget/stray.txt");
+    await writeFile(stray, "x");
+    try {
+      await expect(open("ignored")).rejects.toThrow(/acme\/gadget.*dirty/);
+    } finally {
+      await rm(stray);
     }
   });
 
-  it("throws SnapshotUnavailableError when no snapshot exists", async () => {
-    await expect(provider.createInvestigationSandbox({ snapshotName: "nonexistent" })).rejects.toBeInstanceOf(
-      SnapshotUnavailableError,
-    );
-  });
-
-  it("pruneSnapshots is a no-op", async () => {
-    await expect(provider.pruneSnapshots("support-triage-bot-test-local", 2)).resolves.toBeUndefined();
-  });
-
-  it("streams events and delivers the key only through a file the runner deletes", async () => {
-    const sbx = await createOne();
+  it("returns events and delivers the key only through a file the runner deletes", async () => {
+    const sbx = await open("ignored");
     const key = "sk-ant-local-test-key";
     process.env.TRIAGE_TEST_ECHO_KEY = key;
-    const events: RunnerEvent[] = [];
+    let events: RunnerEvent[];
     try {
-      const res = await provider.runInvestigation(sbx, {
-        input: runnerInput(sbx.layout),
-        modelApiKey: key,
-        timeoutMs: 10_000,
-        onEvent: (e) => void events.push(e),
-      });
+      const res = await sbx.run({ input: runnerInput(sbx), modelApiKey: key, timeoutMs: 10_000 });
       expect(res).toMatchObject({ exitCode: 0, aborted: false, invalidLines: 1 });
       expect(res.stderrTail).toContain("fake runner diagnostics");
+      events = res.events;
     } finally {
       delete process.env.TRIAGE_TEST_ECHO_KEY;
     }
     expect(events.map((e) => e.type)).toEqual(["started", "assistant_text", "result"]);
     const report = runnerReport(events);
-    expect(report).toMatchObject({ key, keyFileGone: true, keyInEnv: false, cwd: expect.stringContaining(sbx.layout.scratchDir) });
+    expect(report).toMatchObject({ key, keyFileGone: true, keyInEnv: false, cwd: expect.stringContaining(sbx.scratchDir) });
     expect(existsSync(report.keyPath!)).toBe(false);
   });
 
   it("removes the key file even when the runner leaves it behind", async () => {
-    const sbx = await createOne();
-    const events: RunnerEvent[] = [];
-    await provider.runInvestigation(sbx, {
-      input: runnerInput(sbx.layout, "keep-key"),
-      modelApiKey: "sk-ant-kept",
-      timeoutMs: 10_000,
-      onEvent: (e) => void events.push(e),
-    });
+    const sbx = await open("ignored");
+    const { events } = await sbx.run({ input: runnerInput(sbx, "keep-key"), modelApiKey: "sk-ant-kept", timeoutMs: 10_000 });
     const report = runnerReport(events);
     expect(report.keyFileGone).toBe(false);
     expect(existsSync(report.keyPath!)).toBe(false);
   });
 
   it("kills the runner at the deadline and on abort", async () => {
-    const sbx = await createOne();
-    const input = runnerInput(sbx.layout, "hang");
-    const timedOut = await provider.runInvestigation(sbx, { input, timeoutMs: 500, onEvent: () => {} });
+    const sbx = await open("ignored");
+    const input = runnerInput(sbx, "hang");
+    const timedOut = await sbx.run({ input, timeoutMs: 500 });
     expect(timedOut).toMatchObject({ exitCode: 124, aborted: false });
+    expect(timedOut.events.map((e) => e.type)).toContain("started");
 
     const ac = new AbortController();
     const started = Date.now();
-    const aborted = await provider.runInvestigation(sbx, {
-      input,
-      timeoutMs: 60_000,
-      signal: ac.signal,
-      onEvent: (e) => {
-        if (e.type === "assistant_text") ac.abort();
-      },
-    });
+    setTimeout(() => ac.abort(), 500);
+    const aborted = await sbx.run({ input, timeoutMs: 60_000, signal: ac.signal });
     expect(aborted).toEqual(expect.objectContaining({ exitCode: null, aborted: true }));
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
-  it("propagates onEvent errors", async () => {
-    const sbx = await createOne();
-    await expect(
-      provider.runInvestigation(sbx, {
-        input: runnerInput(sbx.layout),
-        timeoutMs: 10_000,
-        onEvent: () => {
-          throw new Error("trace write failed");
-        },
-      }),
-    ).rejects.toThrow("trace write failed");
+  it("bundles the real runner on first use when no runner command is configured", { timeout: 60_000 }, async () => {
+    const bundled = localSandboxes({ ...cfg, runnerCmd: undefined, runnerArgs: "--faux" });
+    const sbx = await bundled("ignored");
+    const input = { ...runnerInput(sbx, "claude-sonnet-4-5"), manifest: sbx.manifest };
+    const res = await sbx.run({ input, timeoutMs: 30_000 });
+    expect(res.exitCode, res.stderrTail).toBe(0);
+    expect(res.events.at(-1)).toMatchObject({ type: "result", result: { status: "final_answer" } });
   });
 
-  it("terminate removes the sandbox dir", async () => {
-    const id = "local-00000000-0000-4000-8000-000000000000";
-    await mkdir(join(root, "sandboxes", id, "scratch"), { recursive: true });
-    await provider.terminate(id);
-    expect(existsSync(join(root, "sandboxes", id))).toBe(false);
-    await expect(provider.terminate("../etc")).rejects.toThrow("refusing");
+  it("close removes the sandbox dir and is idempotent", async () => {
+    const sbx = await open("ignored");
+    await sbx.close();
+    expect(existsSync(sbx.scratchDir)).toBe(false);
+    await expect(sbx.close()).resolves.toBeUndefined();
   });
 });

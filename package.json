@@ -1,10 +1,10 @@
 {
-  "name": "support-triage-bot",
+  "name": "code-investigator",
   "private": true,
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/render-examples/support-triage-bot.git"
+    "url": "https://github.com/render-examples/code-investigator.git"
   },
   "type": "module",
   "packageManager": "pnpm@11.9.0",
@@ -14,8 +14,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build:runner": "node scripts/build-runner.mjs",
-    "refresh": "tsx src/refresh.ts",
+    "refresh": "tsx src/cron.ts",
     "start:api": "tsx src/api.ts",
     "start:workflow": "tsx src/workflow.ts"
   },

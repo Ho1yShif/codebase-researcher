@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { ClientError } from "@renderinc/sdk";
 import { createApp, loadEnv, toQuestionId, type AppDeps, type GetTaskRun } from "../src/api.ts";
-import { signCallback, verifyCallback, type StartQuestion } from "../src/types.ts";
+import { signCallback, verifyCallback } from "../src/callback.ts";
+import type { StartQuestion } from "../src/types.ts";
 
 const TOKEN = "test-api-token-1234";
 
@@ -17,7 +19,6 @@ function harness(overrides: Partial<AppDeps> = {}) {
 
   const deps: AppDeps = {
     apiToken: TOKEN,
-    taskSlug: "support-triage-bot-workflow/answer_question",
     startQuestion,
     getTaskRun,
     isLocalDev: false,
@@ -153,7 +154,17 @@ describe("POST /v1/questions", () => {
       body: JSON.stringify(validBody()),
     });
     expect(res.status).toBe(500);
-    expect(logs.some((l) => l.includes("task_start_failed"))).toBe(true);
+    expect(logs.some((l) => l.includes("request_failed"))).toBe(true);
+  });
+
+  it("returns 400 for malformed JSON", async () => {
+    const { app } = harness();
+    const res = await app.request("/v1/questions", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...AUTH },
+      body: "{not json",
+    });
+    expect(res.status).toBe(400);
   });
 });
 
@@ -198,9 +209,17 @@ describe("GET /v1/questions/:id", () => {
     expect(lookups).toEqual(["trn-mine"]);
   });
 
+  it("returns 500 for non-404 Render errors", async () => {
+    const { app } = harness({
+      getTaskRun: async () => { throw new ClientError("Failed to get task run: forbidden", 403); },
+    });
+    const res = await app.request(`/v1/questions/${qid("forbidden")}`, { headers: AUTH });
+    expect(res.status).toBe(500);
+  });
+
   it("returns 404 for unknown run IDs", async () => {
     const { app } = harness({
-      getTaskRun: async () => { const err = new Error("not found"); (err as any).status = 404; throw err; },
+      getTaskRun: async () => { throw new ClientError("Failed to get task run: not found", 404); },
     });
     const res = await app.request(`/v1/questions/${qid("missing")}`, { headers: AUTH });
     expect(res.status).toBe(404);
@@ -259,12 +278,18 @@ describe("loadEnv", () => {
 
   it("derives taskSlug from WORKFLOW_SLUG", () => {
     const env = loadEnv(base);
-    expect(env.taskSlug).toBe("support-triage-bot-workflow/answer_question");
+    expect(env.taskSlug).toBe("code-investigator-workflow/answer_question");
   });
 
   it("RENDER_USE_LOCAL_DEV=true is local dev", () => {
     const env = loadEnv({ ...base, RENDER_USE_LOCAL_DEV: "true" });
     expect(env.useLocalDev).toBe(true);
+  });
+
+  it("RENDER_USE_LOCAL_DEV accepts common boolean spellings and rejects garbage", () => {
+    expect(loadEnv({ ...base, RENDER_USE_LOCAL_DEV: "1" }).useLocalDev).toBe(true);
+    expect(loadEnv({ ...base, RENDER_USE_LOCAL_DEV: "false" }).useLocalDev).toBe(false);
+    expect(() => loadEnv({ ...base, RENDER_USE_LOCAL_DEV: "maybe" })).toThrow();
   });
 
   it("RENDER_LOCAL_DEV_URL implies local dev", () => {
@@ -276,13 +301,13 @@ describe("loadEnv", () => {
     expect(() => loadEnv({ API_TOKEN: "tok" })).toThrow();
   });
 
-  it("slackEnabled when both SLACK_SIGNING_SECRET and SLACK_BOT_TOKEN are set", () => {
+  it("slackCredentials set when both SLACK_SIGNING_SECRET and SLACK_BOT_TOKEN are set", () => {
     const env = loadEnv({ ...base, SLACK_SIGNING_SECRET: "s", SLACK_BOT_TOKEN: "t" });
-    expect(env.slackEnabled).toBe(true);
+    expect(env.slackCredentials).toEqual({ signingSecret: "s", botToken: "t" });
   });
 
-  it("slackEnabled false when Slack vars are missing", () => {
-    const env = loadEnv(base);
-    expect(env.slackEnabled).toBe(false);
+  it("slackCredentials undefined when Slack vars are missing", () => {
+    expect(loadEnv(base).slackCredentials).toBeUndefined();
+    expect(loadEnv({ ...base, SLACK_SIGNING_SECRET: "s" }).slackCredentials).toBeUndefined();
   });
 });

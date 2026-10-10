@@ -1,7 +1,6 @@
 import type { Slack, BotIdentity } from "../src/slack.ts";
 import type { RepoManifest, RunnerEvent } from "../src/types.ts";
-import { SnapshotUnavailableError } from "../src/sandbox.ts";
-import type { BuildSnapshotOptions, BuiltSnapshot, InvestigationSandbox, RunInvestigationOptions, RunInvestigationResult, SandboxLayout, SandboxProvider } from "../src/sandbox.ts";
+import { SnapshotUnavailableError, type OpenSandbox, type RunInvestigationOptions, type RunInvestigationResult } from "../src/sandbox/interface.ts";
 
 type Reaction = { name: string; user: string };
 
@@ -128,8 +127,6 @@ export const TEST_MANIFEST: RepoManifest = {
   ],
 };
 
-export const TEST_LAYOUT: SandboxLayout = { reposRoot: "/repos", scratchDir: "/scratch", appDir: "/app" };
-
 export type Script = {
   events?: RunnerEvent[];
   exitCode?: number | null;
@@ -139,10 +136,10 @@ export type Script = {
   throws?: Error;
 };
 
-export class FakeProvider implements SandboxProvider {
-  readonly name = "local" as const;
+/** Hands out scripted sandboxes and records what ran and what was closed. */
+export class FakeSandboxes {
   readonly runs: { sandboxId: string; opts: RunInvestigationOptions }[] = [];
-  readonly terminated: string[] = [];
+  readonly closed: string[] = [];
   #scripts: Script[] = [];
   #next = 0;
   noSnapshot = false;
@@ -152,37 +149,28 @@ export class FakeProvider implements SandboxProvider {
     return this;
   }
 
-  async resolveHeads(): Promise<never> {
-    throw new Error("not used by the workflow");
-  }
-
-  async buildSnapshot(): Promise<BuiltSnapshot> {
-    throw new Error("not used by the workflow");
-  }
-
-  async pruneSnapshots(): Promise<void> {
-    throw new Error("not used by the workflow");
-  }
-
-  async createInvestigationSandbox(): Promise<InvestigationSandbox> {
+  readonly open: OpenSandbox = async () => {
     if (this.noSnapshot) throw new SnapshotUnavailableError("no snapshot");
     const id = `sbx-${++this.#next}`;
-    return { id, manifest: TEST_MANIFEST, layout: TEST_LAYOUT, info: {} };
-  }
+    return {
+      id,
+      manifest: TEST_MANIFEST,
+      reposRoot: "/repos",
+      scratchDir: "/scratch",
+      info: {},
+      run: (opts) => this.#run(id, opts),
+      close: async () => void this.closed.push(id),
+    };
+  };
 
-  async runInvestigation(sandbox: InvestigationSandbox, opts: RunInvestigationOptions): Promise<RunInvestigationResult> {
+  async #run(sandboxId: string, opts: RunInvestigationOptions): Promise<RunInvestigationResult> {
     const script = this.#scripts.shift();
-    if (!script) throw new Error("FakeProvider: no script left");
-    this.runs.push({ sandboxId: sandbox.id, opts });
+    if (!script) throw new Error("FakeSandboxes: no script left");
+    this.runs.push({ sandboxId, opts });
     if (script.throws) throw script.throws;
-    for (const event of script.events ?? []) await opts.onEvent(event);
     const aborted = (script.aborted ?? false) || (opts.signal?.aborted ?? false);
     const streamLost = !aborted && (script.streamLost ?? false);
     const exitCode = aborted || streamLost ? null : script.exitCode === undefined ? 0 : script.exitCode;
-    return { exitCode, aborted, streamLost, stderrTail: script.stderrTail ?? "", invalidLines: 0 };
-  }
-
-  async terminate(id: string): Promise<void> {
-    this.terminated.push(id);
+    return { exitCode, aborted, streamLost, stderrTail: script.stderrTail ?? "", events: script.events ?? [], invalidLines: 0 };
   }
 }

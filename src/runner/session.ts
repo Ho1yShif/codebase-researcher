@@ -5,7 +5,7 @@ import { hermeticResourceLoader, type Model, type Pi, THINKING_BUDGETS } from ".
 import { createSafeBashTool } from "./tools.ts";
 import { createSearchTools } from "./tools.ts";
 import { createSubmitTool, MAX_SUBMIT_ATTEMPTS, SUBMIT_TOOL } from "./submit.ts";
-import CORE_PROMPT from "../../sandbox/core-prompt.md?raw";
+import CORE_PROMPT from "./core-prompt.md?raw";
 import INSTANCE_PROMPT from "../../prompt.md?raw";
 import { createHash } from "node:crypto";
 
@@ -49,7 +49,7 @@ const TOOLS = ["read", "grep", "find", "ls", "bash", SUBMIT_TOOL];
 
 type Failure = { code: Extract<RunnerEvent, { type: "error" }>["code"]; message: string };
 
-export interface RunOptions {
+export interface SessionOptions {
   pi: Pi;
   input: RunnerInput;
   modelRuntime: ModelRuntime;
@@ -60,7 +60,7 @@ export interface RunOptions {
 }
 
 /** Runs one investigation and emits `started` … then exactly one `result` or `error`. Returns the exit code. */
-export async function runInvestigation({ pi, input, modelRuntime, model, emit, startedAt }: RunOptions): Promise<number> {
+export async function runSession({ pi, input, modelRuntime, model, emit, startedAt }: SessionOptions): Promise<number> {
   let submission: InvestigationResult | undefined;
   let failure: Failure | undefined;
   const checkouts = { manifest: input.manifest, repos_root: input.repos_root };

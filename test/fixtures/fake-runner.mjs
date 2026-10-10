@@ -1,4 +1,4 @@
-// Stand-in for sandbox/runner/dist/runner.mjs that follows its CLI contract.
+// Stand-in for the bundled runner.mjs that follows its CLI contract.
 // Behavior is selected by input.model: "hang" never finishes, "keep-key" leaves the key file in place.
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 

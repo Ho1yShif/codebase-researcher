@@ -5,7 +5,8 @@ import type { KnownBlock, ContextBlock, SectionBlock } from "@slack/types";
 import type { Hono } from "hono";
 import { z } from "zod";
 import type { Evidence, FinalAnswer, NeedsClarification, Transcript } from "./types.ts";
-import { buildEvidenceUrl, safeEqual, verifyCallback, type ApiTranscript, type Reply, type StartQuestion } from "./types.ts";
+import { buildEvidenceUrl, errorMessage, type ApiTranscript, type Reply, type StartQuestion } from "./types.ts";
+import { safeEqual, verifyCallback } from "./callback.ts";
 import config from "../config.ts";
 
 const MAX_SKEW_SECONDS = 5 * 60;
@@ -413,7 +414,7 @@ export function mountSlackRoutes(
     try {
       await react(slack, event.channel, event.ts, "eyes");
     } catch (err) {
-      slackDeps.log(JSON.stringify({ event: "eyes_failed", error: err instanceof Error ? err.message : String(err) }));
+      slackDeps.log(JSON.stringify({ event: "eyes_failed", error: errorMessage(err) }));
     }
 
     // Read the thread into a transcript
@@ -454,7 +455,7 @@ export function mountSlackRoutes(
         JSON.stringify({
           event: "task_start_failed",
           event_id: event.eventId,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMessage(err),
         }),
       );
       return c.text("internal error", 500);

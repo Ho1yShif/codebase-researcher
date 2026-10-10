@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies a prepared sandbox: the builder before it is snapshotted, and every pool member after restore.
-# Prints one JSON line describing the sandbox (layout, runner user, Pi/prompt versions, runner dumpability, DNS).
+# Prints one JSON line describing the sandbox (runner user, Pi/prompt versions, runner dumpability, DNS).
 # Usage: verify.sh [--deny-probe URL] [--allow-probe URL]   (egress probes run as the runner user)
 set -euo pipefail
 
@@ -19,12 +19,29 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# ── Tools ─────────────────────────────────────────────────────────────────
+
 for tool in git rg timeout; do PATH="$TRIAGE_PATH" command -v "$tool" >/dev/null || fail "missing $tool"; done
 node_version=$("$TRIAGE_NODE" -p 'process.versions.node') || fail "node does not run"
 [ "${node_version%%.*}" -ge 22 ] || fail "node $node_version is older than 22"
 
-bash "$app/scrub-credentials.sh" "$TRIAGE_REPOS_ROOT" /tmp/triage-stage/creds
-[ ! -e /tmp/triage-stage ] || fail "staging dir /tmp/triage-stage still exists"
+# ── Credential hygiene ────────────────────────────────────────────────────
+# No stored credentials or credential helpers should survive into the snapshot.
+
+[ ! -e "$HOME/.git-credentials" ] || fail "$HOME/.git-credentials exists"
+pattern='^(credential\.|url\..*\.insteadof|http\..*\.extraheader)'
+for scope in --system --global; do
+  if git config "$scope" --get-regexp "$pattern" >/dev/null 2>&1; then fail "credential settings in git $scope config"; fi
+done
+repos=$(find "$TRIAGE_REPOS_ROOT" -mindepth 3 -maxdepth 3 -name .git -type d -exec dirname {} \;)
+[ -n "$repos" ] || fail "no repos under $TRIAGE_REPOS_ROOT"
+while IFS= read -r r; do
+  if git -c safe.directory='*' -C "$r" config --local --get-regexp "$pattern" >/dev/null 2>&1; then fail "$r: credential settings in .git/config"; fi
+  url=$(git -c safe.directory='*' -C "$r" config --local --get remote.origin.url || true)
+  case "$url" in *@*) fail "$r: remote URL carries credentials" ;; esac
+done <<<"$repos"
+
+# ── Manifest and repo integrity ──────────────────────────────────────────
 
 entries=$("$TRIAGE_NODE" -e '
 const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
@@ -39,12 +56,15 @@ while IFS=$'\t' read -r commit path repo; do
   [ -z "$dirty" ] || fail "$repo: working tree modified"
 done <<<"$entries"
 
+# ── Runner self-test ─────────────────────────────────────────────────────
+
 self_test=$(as_runner "$TRIAGE_RUNNER_NODE" "$app/runner/runner.mjs" --self-test) || fail "runner self-test failed"
 
-# Tool subprocesses run with the runner's uid; only a non-dumpable runner keeps its memory (the model key) from them.
+# ── Non-dumpable check ───────────────────────────────────────────────────
+# An execute-only runner node keeps its memory (the model key) from same-uid tool subprocesses via /proc.
+
 non_dumpable=false
 if [ "$(id -u)" = 0 ] && [ "$TRIAGE_RUN_AS" != root ]; then
-  # The sandbox has no usable /dev/fd, so the probe reports its pid through a file instead of process substitution.
   pidfile="$TRIAGE_SCRATCH_DIR/.triage-dumpable-probe.pid"
   rm -f "$pidfile"
   as_runner "$TRIAGE_RUNNER_NODE" -e 'require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000)' "$pidfile" &
@@ -59,7 +79,9 @@ if [ "$(id -u)" = 0 ] && [ "$TRIAGE_RUN_AS" != root ]; then
   stop_probe
   case "$err" in *"Permission denied"*) non_dumpable=true ;; *) fail "dumpability probe inconclusive: $err" ;; esac
 fi
-# Informational: resolution of arbitrary names is an exfiltration channel the network policy does not close.
+
+# ── DNS and permissions ──────────────────────────────────────────────────
+
 dns_resolves=false
 if timeout 10 "$app/as-runner.sh" getent hosts example.com >/dev/null 2>&1; then dns_resolves=true; fi
 
@@ -71,18 +93,21 @@ if as_runner touch "$repo/.triage-write-probe" 2>/dev/null; then
 fi
 as_runner touch "$TRIAGE_SCRATCH_DIR/.triage-write-probe" || fail "scratch is not writable by $TRIAGE_RUN_AS"
 
+# ── Egress probes ────────────────────────────────────────────────────────
+
 probe='fetch(process.argv[1], { redirect: "manual", signal: AbortSignal.timeout(8000) }).then(() => process.exit(0), () => process.exit(1))'
 if [ -n "$deny_probe" ] && as_runner "$TRIAGE_NODE" -e "$probe" "$deny_probe"; then fail "egress to $deny_probe is allowed"; fi
 if [ -n "$allow_probe" ] && ! as_runner "$TRIAGE_NODE" -e "$probe" "$allow_probe"; then fail "egress to $allow_probe is blocked"; fi
 
+# ── Cleanup and report ───────────────────────────────────────────────────
+
 find "$TRIAGE_SCRATCH_DIR" -mindepth 1 -delete
 
 "$TRIAGE_NODE" -e '
-const [reposRoot, scratchDir, appDir, runAs, uid, drop, selfTest, nonDumpable, dnsResolves] = process.argv.slice(1);
-const info = { reposRoot, scratchDir, appDir };
+const [runAs, uid, drop, selfTest, nonDumpable, dnsResolves] = process.argv.slice(1);
 console.log(JSON.stringify({
-  layout: info, runAs, uid: Number(uid), drop, node: process.version,
+  runAs, uid: Number(uid), drop, node: process.version,
   runnerNonDumpable: nonDumpable === "true", dnsResolves: dnsResolves === "true",
   selfTest: JSON.parse(selfTest.trim().split("\n").pop()),
 }));
-' "$TRIAGE_REPOS_ROOT" "$TRIAGE_SCRATCH_DIR" "$TRIAGE_APP_DIR" "$TRIAGE_RUN_AS" "$(id -u)" "$TRIAGE_DROP" "$self_test" "$non_dumpable" "$dns_resolves"
+' "$TRIAGE_RUN_AS" "$(id -u)" "$TRIAGE_DROP" "$self_test" "$non_dumpable" "$dns_resolves"

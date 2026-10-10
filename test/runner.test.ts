@@ -1,22 +1,25 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { beforeAll, describe, expect, it } from "vitest";
-import { makeFixture, makeInput, parseEvents, REPO, RUNNER_DIR, runCli, terminal, toolResults, CLARIFY, call, calls, runScripted, say, finalAnswer } from "./helpers.ts";
+import { rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildRunner, makeFixture, makeInput, parseEvents, REPO, RUNNER_DIR, runCli, terminal, toolResults, CLARIFY, call, calls, runScripted, say, finalAnswer } from "./helpers.ts";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { apiKeyFor, takeCredentials } from "../src/runner/main.ts";
-import { MAX_TURNS } from "../src/runner/run.ts";
+import { MAX_TURNS } from "../src/runner/session.ts";
 import { rejectReason, splitCommands } from "../src/runner/tools.ts";
 import { validateSubmission } from "../src/runner/submit.ts";
 
 const SUBMIT = "submit_investigation";
 
-beforeAll(() => {
-  execFileSync(process.execPath, [fileURLToPath(new URL("../scripts/build-runner.mjs", import.meta.url))]);
+let runnerDir: string;
+
+beforeAll(async () => {
+  runnerDir = dirname(await buildRunner());
 }, 60_000);
 
-describe("built runner (dist/runner.mjs)", { timeout: 30_000 }, () => {
+afterAll(() => rm(runnerDir, { recursive: true, force: true }));
+
+describe("bundled runner (runner.mjs)", { timeout: 30_000 }, () => {
   it("--faux investigates the checkout and submits a cited final_answer", () => {
     const fx = makeFixture();
     const { code, stdout, stderr } = runCli(["--faux"], JSON.stringify(makeInput(fx)));
@@ -106,8 +109,8 @@ describe("built runner (dist/runner.mjs)", { timeout: 30_000 }, () => {
     expect(code).toBe(0);
   });
 
-  it("writes dist/package.json with the externals pinned exactly", () => {
-    const pkg = JSON.parse(execFileSync("cat", [fileURLToPath(new URL("../sandbox/dist/package.json", import.meta.url))], { encoding: "utf8" }));
+  it("writes package.json with the externals pinned exactly", () => {
+    const pkg = JSON.parse(readFileSync(join(runnerDir, "package.json"), "utf8"));
     expect(pkg).toEqual({
       type: "module",
       private: true,
@@ -446,7 +449,7 @@ describe("runner import boundary", () => {
           // Must be within runner/ or src/types.ts
           if (spec.startsWith("./")) continue; // same directory
           if (spec === "../types.ts") continue;
-          // Allow ?raw imports from outside (prompt.md, core-prompt.md)
+          // Allow ?raw imports from outside (prompt.md)
           if (spec.endsWith("?raw")) continue;
           violations.push(`${file}: imports "${spec}" (outside runner/ and not src/types.ts)`);
           continue;

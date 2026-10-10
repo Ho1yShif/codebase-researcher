@@ -1,13 +1,21 @@
 import { spawnSync } from "node:child_process";
-import { describe, expect, it } from "vitest";
+import { rm } from "node:fs/promises";
+import { dirname } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { InvestigationResult, PROVIDER_KEY_ENV, providerApiKey, RunnerEvent } from "../src/types.ts";
-import { makeFixture, makeInput, parseEvents, RUNNER } from "./helpers.ts";
+import { buildRunner, makeFixture, makeInput, parseEvents } from "./helpers.ts";
 
 const provider = process.env.LIVE_MODEL_PROVIDER;
 
 const hasKey = !!(provider && providerApiKey(provider, process.env));
 
 describe.skipIf(!provider || !hasKey)(`live smoke test (${provider})`, { timeout: 300_000 }, () => {
+  let runner: string;
+  beforeAll(async () => {
+    runner = await buildRunner();
+  }, 60_000);
+  afterAll(() => rm(dirname(runner), { recursive: true, force: true }));
+
   it("investigates the fixture repo and submits a valid result", () => {
     const fx = makeFixture();
     const input = {
@@ -16,7 +24,7 @@ describe.skipIf(!provider || !hasKey)(`live smoke test (${provider})`, { timeout
       model: process.env.LIVE_MODEL ?? (provider === "anthropic" ? "claude-sonnet-4-5" : provider === "openai" ? "gpt-4.1" : "gemini-2.5-flash"),
       thinking_level: "off" as const,
     };
-    const res = spawnSync(process.execPath, [RUNNER], {
+    const res = spawnSync(process.execPath, [runner], {
       input: JSON.stringify(input),
       encoding: "utf8",
       env: { PATH: process.env.PATH, HOME: process.env.HOME, [PROVIDER_KEY_ENV[provider!]![0]!]: providerApiKey(provider!, process.env) },

@@ -1,6 +1,3 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
@@ -9,16 +6,20 @@ import type { RepoManifest, RunnerEvent } from "../src/types.ts";
 import { AbortError, ClientError, RenderError, SandboxSnapshotNotFoundError } from "@renderinc/sdk";
 import type { SandboxExecEvent } from "@renderinc/sdk/experimental";
 import { list as listTar } from "tar";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createProvider, SnapshotUnavailableError, parseLsRemote, RenderProvider, resolveWorkspaceId } from "../src/sandbox.ts";
-import type { NetworkPolicy, RenderProviderConfig, InvestigationSandbox, SandboxApi } from "../src/sandbox.ts";
+import { beforeEach, describe, expect, it } from "vitest";
+import { configureSandboxes } from "../src/sandbox/index.ts";
+import { SnapshotUnavailableError } from "../src/sandbox/interface.ts";
+import { SandboxClient, type SandboxApi } from "../src/sandbox/render/client.ts";
+import { resolveWorkspaceId, type NetworkPolicy, type RenderConfig } from "../src/sandbox/render/config.ts";
+import { openRenderSandbox, runInvestigation } from "../src/sandbox/render/sandbox.ts";
+import { buildSnapshot, parseLsRemote, pruneSnapshots } from "../src/sandbox/render/snapshot.ts";
 import { runnerInput } from "./helpers.ts";
 
 const GH_TOKEN = "ghp_renderProviderSecret000000000000";
 const MODEL_KEY = "sk-ant-api03-renderProviderSecret";
-const LAYOUT = { reposRoot: "/opt/triage/repos", scratchDir: "/opt/triage/scratch", appDir: "/opt/triage/app" };
+const LAYOUT = { reposRoot: "/opt/triage/repos", scratchDir: "/opt/triage/scratch" };
 const SHA = "1".repeat(40);
-const NAME = "support-triage-bot-corpus";
+const NAME = "code-investigator-corpus";
 const profile = { name: "default", repos: [{ repository: "render-oss/cli" }, { repository: "acme/api", branch: "main" }] };
 const heads: RepoManifest["repos"] = [
   { repository: "render-oss/cli", branch: "main", commit: SHA, path: "render-oss/cli" },
@@ -38,7 +39,6 @@ const out = (data: string, stream: "stdout" | "stderr" = "stdout"): SandboxExecE
 const exit = (code = 0): SandboxExecEvent => ({ type: "exit", exit_code: code });
 const info = () =>
   JSON.stringify({
-    layout: LAYOUT,
     runAs: "investigator",
     uid: 0,
     drop: "setpriv",
@@ -53,6 +53,9 @@ class FakeApi {
   calls: Call[] = [];
   createError?: (input: Parameters<SandboxApi["create"]>[0]) => Error | undefined;
   exec_: ExecHandler = () => [exit(0)];
+  /** Contents of sandbox files other than manifest.json; undefined means the download fails. */
+  file_: (path: string) => string | undefined = () => undefined;
+  status: "running" | "terminated" = "running";
   manifest = (): RepoManifest => ({
     profile: "default",
     created_at: new Date().toISOString(),
@@ -79,7 +82,7 @@ class FakeApi {
         };
       },
       async get(id) {
-        return { id, status: "running", plan: "starter", networkPolicy: { default: "allow-all" }, region: "oregon", timeoutSeconds: 1, createdAt: "" };
+        return { id, status: self.status, plan: "starter", networkPolicy: { default: "allow-all" }, region: "oregon", timeoutSeconds: 1, createdAt: "" };
       },
       async exec(id, command, _ownerId, signal) {
         self.calls.push({ op: "exec", id, command });
@@ -92,7 +95,9 @@ class FakeApi {
       },
       async download(id, path) {
         self.calls.push({ op: "download", id, path });
-        const data = Buffer.from(JSON.stringify(self.manifest()));
+        const text = path.endsWith("/manifest.json") ? JSON.stringify(self.manifest()) : self.file_(path);
+        if (text === undefined) throw new Error(`no such file: ${path}`);
+        const data = Buffer.from(text);
         return { data, size: data.length };
       },
       async terminate(id) {
@@ -145,12 +150,11 @@ function snapshot(id: string, status: "creating" | "available" | "failed", name?
   };
 }
 
-let tmp: string;
 let fake: FakeApi;
-const SANDBOX_DIR = fileURLToPath(new URL("../sandbox/", import.meta.url));
+const SANDBOX_DIR = fileURLToPath(new URL("../sandbox-runtime/", import.meta.url));
 
-function provider(policy: NetworkPolicy = { default: "allow-list", allowedDomains: ["api.anthropic.com"] }, api = fake.api()) {
-  const cfg: RenderProviderConfig = {
+function client(policy: NetworkPolicy = { default: "allow-list", allowedDomains: ["api.anthropic.com"] }, api = fake.api()) {
+  const cfg: RenderConfig = {
     apiKey: "rnd_test",
     workspaceId: "tea-test",
     hostCredentials: { "github.com": { username: "x-access-token", token: GH_TOKEN } },
@@ -159,68 +163,41 @@ function provider(policy: NetworkPolicy = { default: "allow-list", allowedDomain
     builderTimeoutSeconds: 3_600,
     minRequestIntervalMs: 0,
     sandboxDir: SANDBOX_DIR,
-    runnerDistDir: join(tmp, "dist"),
   };
-  return new RenderProvider(api, cfg, { pollMs: 1, bootTimeoutMs: 1_000, investigationGraceMs: 30_000 });
+  return new SandboxClient(api, cfg, { pollMs: 1, bootTimeoutMs: 1_000, investigationGraceMs: 30_000 });
 }
-
-beforeAll(async () => {
-  tmp = await mkdtemp(join(tmpdir(), "triage-render-provider-"));
-  await mkdir(join(tmp, "dist/node_modules/left-pad"), { recursive: true });
-  await writeFile(join(tmp, "dist/runner.mjs"), "// runner\n");
-  await writeFile(join(tmp, "dist/package.json"), "{}\n");
-  await writeFile(join(tmp, "dist/package-lock.json"), "{}\n");
-  await writeFile(join(tmp, "dist/node_modules/left-pad/index.js"), "// must not be uploaded\n");
-});
-
-afterAll(() => rm(tmp, { recursive: true, force: true }));
 
 beforeEach(() => {
   fake = new FakeApi();
 });
 
-function investigation(overrides: Partial<InvestigationSandbox> = {}): InvestigationSandbox {
-  return {
-    id: "sbx-run",
-    manifest: fake.manifest(),
-    layout: LAYOUT,
-    info: {},
-    ...overrides,
-  };
-}
-
 const event = (e: object) => `${JSON.stringify({ at: new Date().toISOString(), ...e })}\n`;
 
-describe("RenderProvider.runInvestigation", () => {
-  it("parses JSONL split across chunks and counts invalid lines", async () => {
+describe("runInvestigation", () => {
+  it("reads events from the run's output file and counts invalid lines", async () => {
     const started = event({ type: "started", pi_version: "0.83.0", model: "m", prompt_version: "v3" });
     const result = event({ type: "result", result: { status: "needs_clarification", question: "Which region?", why_needed: "x" } });
     fake.exec_ = (_id, command) =>
-      command.includes("run-investigation.sh")
-        ? [
-            out(started.slice(0, 10)),
-            out(started.slice(10) + "not json\n" + '{"type":"nope"}\n' + result.slice(0, 5)),
-            out("runner diagnostics", "stderr"),
-            out(result.slice(5).trimEnd()),
-            exit(0),
-          ]
-        : [exit(0)];
-    const events: RunnerEvent[] = [];
-    const res = await provider().runInvestigation(investigation(), {
+      command.includes("run-investigation.sh") ? [out("runner ", "stderr"), out("diagnostics", "stderr"), exit(0)] : [exit(0)];
+    fake.file_ = (path) => (path.endsWith(".jsonl") ? started + "not json\n" + '{"type":"nope"}\n' + result.trimEnd() : undefined);
+    const stderr: string[] = [];
+    const res = await runInvestigation(client(), "sbx-run", {
       input: runnerInput(LAYOUT),
       timeoutMs: 60_000,
-      onEvent: (e) => void events.push(e),
+      onStderr: (chunk) => void stderr.push(chunk),
     });
-    expect(res).toEqual({ exitCode: 0, aborted: false, streamLost: false, invalidLines: 2, stderrTail: "runner diagnostics" });
-    expect(events.map((e) => e.type)).toEqual(["started", "result"]);
+    expect(res).toMatchObject({ exitCode: 0, aborted: false, streamLost: false, invalidLines: 2, stderrTail: "runner diagnostics" });
+    expect(res.events.map((e) => e.type)).toEqual(["started", "result"]);
+    expect(stderr).toEqual(["runner ", "diagnostics"]);
+    const runDir = /run-investigation\.sh (\S+) /.exec(fake.commands()[1]!)![1];
+    expect(fake.calls.flatMap((c) => (c.op === "download" ? [c.path] : []))).toEqual([`${runDir}.jsonl`]);
   });
 
   it("uploads the model key as a file and never puts it in a command", async () => {
-    await provider().runInvestigation(investigation(), {
+    await runInvestigation(client(), "sbx-run", {
       input: runnerInput(LAYOUT),
       modelApiKey: MODEL_KEY,
       timeoutMs: 90_000,
-      onEvent: () => {},
     });
     const commands = fake.commands();
     expect(commands.some((c) => c.includes(MODEL_KEY))).toBe(false);
@@ -233,68 +210,87 @@ describe("RenderProvider.runInvestigation", () => {
     expect(JSON.parse(uploads[0]!.data as string)).toMatchObject({ repos_root: LAYOUT.reposRoot });
   });
 
-  it("distinguishes a caller abort from a lost stream", async () => {
+  it("keeps the partial output of an aborted run", async () => {
     const ac = new AbortController();
+    const started = event({ type: "started", pi_version: "0", model: "m", prompt_version: "v" });
     fake.exec_ = (_id, command, signal) =>
       command.includes("run-investigation.sh")
         ? (async function* () {
-            yield out(event({ type: "started", pi_version: "0", model: "m", prompt_version: "v" }));
+            ac.abort();
             if (!signal!.aborted) await new Promise((resolve) => signal!.addEventListener("abort", resolve));
             throw new AbortError();
           })()
         : [exit(0)];
-    const aborted = await provider().runInvestigation(investigation(), {
-      input: runnerInput(LAYOUT),
-      timeoutMs: 60_000,
-      signal: ac.signal,
-      onEvent: () => ac.abort(),
-    });
-    expect(aborted).toMatchObject({ exitCode: null, aborted: true, streamLost: false });
+    fake.file_ = (path) => (path.endsWith(".jsonl") ? started + '{"type":"tool_c' : undefined);
+    const aborted = await runInvestigation(client(), "sbx-run", { input: runnerInput(LAYOUT), timeoutMs: 60_000, signal: ac.signal });
+    expect(aborted).toMatchObject({ exitCode: null, aborted: true, streamLost: false, invalidLines: 1 });
+    expect(aborted.events.map((e) => e.type)).toEqual(["started"]);
+  });
 
+  it("recovers the exit status after the exec stream drops", async () => {
+    const result = event({ type: "result", result: { status: "needs_clarification", question: "Which region?", why_needed: "x" } });
     fake.exec_ = (_id, command) =>
       command.includes("run-investigation.sh")
         ? (async function* () {
-            yield out('{"type":"sta');
+            yield out("partial diagnostics", "stderr");
             throw new RenderError("Sandbox exec stream ended without a terminal event.");
           })()
         : [exit(0)];
-    const lost = await provider().runInvestigation(investigation(), { input: runnerInput(LAYOUT), timeoutMs: 60_000, onEvent: () => {} });
-    expect(lost).toEqual({ exitCode: null, aborted: false, streamLost: true, invalidLines: 1, stderrTail: "" });
+    let polls = 0;
+    fake.file_ = (path) => (path.endsWith(".exit") ? (++polls < 3 ? undefined : "0\n") : path.endsWith(".jsonl") ? result : undefined);
+    const res = await runInvestigation(client(), "sbx-run", { input: runnerInput(LAYOUT), timeoutMs: 60_000 });
+    expect(res).toMatchObject({ exitCode: 0, aborted: false, streamLost: false, stderrTail: "partial diagnostics" });
+    expect(res.events.map((e) => e.type)).toEqual(["result"]);
+    expect(polls).toBe(3);
+  });
+
+  it("reports a lost run when the sandbox dies after the stream drops", async () => {
+    fake.exec_ = (_id, command) =>
+      command.includes("run-investigation.sh")
+        ? (async function* () {
+            throw new RenderError("Sandbox exec stream ended without a terminal event.");
+          })()
+        : [exit(0)];
+    fake.status = "terminated";
+    const lost = await runInvestigation(client(), "sbx-run", { input: runnerInput(LAYOUT), timeoutMs: 60_000 });
+    expect(lost).toEqual({ exitCode: null, aborted: false, streamLost: true, stderrTail: "", events: [], invalidLines: 0 });
   });
 });
 
 const prepareExec: ExecHandler = (_id, command) => {
-  if (command.includes("prepare.sh checkout") || command.includes("verify.sh")) {
+  if (command.includes("verify.sh")) {
     const line = `${info()}\n`;
     return [out("progress noise\n", "stderr"), out(line.slice(0, 20)), out(line.slice(20)), exit(0)];
+  }
+  if (command.includes("detect") || command.includes("printf \"%s")) {
+    return [out("/opt/triage/app/node/bin/node\nsetpriv\n"), exit(0)];
   }
   return [out("progress noise\n", "stderr"), exit(0)];
 };
 
-describe("RenderProvider.buildSnapshot", () => {
+describe("buildSnapshot", () => {
   it("builds a snapshot in an allow-all builder and names it", async () => {
     fake.exec_ = prepareExec;
-    const p = provider();
-    const built = await p.buildSnapshot({ profile, heads, snapshotName: NAME });
+    const built = await buildSnapshot(client(), { profile, heads, snapshotName: NAME });
+    expect(built).toEqual({ id: "snp-new", sandboxGroupId: "sbg-1" });
 
-    const ops = fake.calls.map((c) => (c.op === "exec" ? `exec:${c.command.split(" ").slice(0, 3).join(" ")}` : c.op));
-    expect(ops).toEqual([
-      "create",
-      "exec:mkdir -p -m",
-      "upload",
-      "upload",
-      "exec:bash /tmp/triage-stage/prepare.sh install",
-      "upload",
-      "exec:bash /tmp/triage-stage/prepare.sh checkout",
-      "download",
-      "snapshot.create",
-      "snapshot.get",
-      "terminate",
-    ]);
+    // Credential upload must happen after install-tools + npm ci + self-test (which execute third-party code)
     const tokenUpload = fake.calls.findIndex((c) => c.op === "upload" && c.path.includes("/creds/"));
-    const execAt = (phase: string) => fake.calls.findIndex((c) => c.op === "exec" && c.command.includes(`prepare.sh ${phase} `));
-    expect(execAt("install")).toBeLessThan(tokenUpload);
-    expect(tokenUpload).toBeLessThan(execAt("checkout"));
+    const installToolsExec = fake.calls.findIndex((c) => c.op === "exec" && c.command.includes("install-tools.sh"));
+    const selfTestExec = fake.calls.findIndex((c) => c.op === "exec" && c.command.includes("--self-test"));
+    expect(installToolsExec).toBeLessThan(tokenUpload);
+    expect(selfTestExec).toBeLessThan(tokenUpload);
+
+    // Clone execs must come after credential upload
+    const cloneExecs = fake.calls.filter((c) => c.op === "exec" && c.command.includes("git") && c.command.includes("clone"));
+    expect(cloneExecs.length).toBe(2);
+    for (const clone of cloneExecs) {
+      expect(fake.calls.indexOf(clone)).toBeGreaterThan(tokenUpload);
+    }
+
+    // Scrub exec (the bash -c script that deletes creds) must come after clones
+    const scrubExec = fake.calls.findIndex((c) => c.op === "exec" && c.command.includes("bash -c") && c.command.includes("creds"));
+    expect(scrubExec).toBeGreaterThan(fake.calls.indexOf(cloneExecs.at(-1)!));
 
     const creates = fake.calls.filter((c) => c.op === "create");
     expect(creates[0]!.input).toEqual({ timeoutSeconds: 3_600, networkPolicy: { default: "allow-all" } });
@@ -303,17 +299,25 @@ describe("RenderProvider.buildSnapshot", () => {
 
     const commands = fake.commands();
     expect(commands.some((c) => c.includes(GH_TOKEN))).toBe(false);
-    expect(commands[1]).toBe("bash /tmp/triage-stage/prepare.sh install /tmp/triage-stage");
-    expect(commands[2]).toMatch(/^bash \/tmp\/triage-stage\/prepare.sh checkout \/tmp\/triage-stage 'default' \d{4}-\d\d-\d\dT/);
+
+    // Manifest is uploaded (computed in TypeScript), not generated by a script
+    const manifestUpload = fake.calls.flatMap((c) => (c.op === "upload" && c.path === "/opt/triage/app/manifest.json" ? [c] : []))[0];
+    expect(manifestUpload).toBeDefined();
+    const uploadedManifest = JSON.parse(manifestUpload!.data as string);
+    expect(uploadedManifest.profile).toBe("default");
+    expect(uploadedManifest.repos).toHaveLength(2);
+
+    // npm ci runs inside a chained exec (not in prepare.sh)
+    expect(commands.some((c) => c.includes("npm ci --omit=dev --ignore-scripts"))).toBe(true);
+    expect(commands.every((c) => !c.match(/npm (install|i) /))).toBe(true);
 
     const uploads = fake.calls.filter((c) => c.op === "upload");
-    expect(uploads.map((u) => [u.path, u.contentType])).toEqual([
-      ["/tmp/triage-stage", "application/x-tar"],
-      ["/tmp/triage-stage/heads.tsv", undefined],
-      ["/tmp/triage-stage/creds/github.com", undefined],
-    ]);
-    expect(uploads[2]!.data).toBe(`x-access-token\n${GH_TOKEN}`);
-    expect(uploads[1]!.data).toBe(`render-oss/cli\tmain\t${SHA}\t\t\nacme/api\tmain\t${"2".repeat(40)}\t\t\n`);
+    expect(uploads[0]!.contentType).toBe("application/x-tar");
+    const credUpload = uploads.find((u) => u.path.includes("/creds/"));
+    expect(credUpload).toBeDefined();
+    expect(credUpload!.data).toBe(`x-access-token\n${GH_TOKEN}`);
+
+    // Stage archive contains only the 4 runtime scripts + runner bundle (no prepare.sh, clone.sh, etc.)
     const files = new Map<string, string>();
     await pipeline(
       Readable.from(uploads[0]!.data as Buffer),
@@ -325,59 +329,52 @@ describe("RenderProvider.buildSnapshot", () => {
         },
       }),
     );
-    expect([...files.keys()]).toEqual(
+    expect([...files.keys()].sort()).toEqual(
       expect.arrayContaining([
         "runner/runner.mjs",
         "runner/package.json",
         "runner/package-lock.json",
-        "run-investigation.sh",
+        "install-tools.sh",
         "as-runner.sh",
-        "prepare.sh",
+        "run-investigation.sh",
+        "verify.sh",
       ]),
     );
-    expect([...files.keys()].some((e) => e.includes("node_modules"))).toBe(false);
-    const install = /install_phase\(\) \{[\s\S]*?\n\}/.exec(files.get("prepare.sh")!)?.[0] ?? "";
-    expect(install).toContain("npm ci --omit=dev --ignore-scripts");
-    expect(install).not.toMatch(/npm (install|i) /);
+    expect(files.get("runner/runner.mjs")).toContain("submit_investigation");
+    expect(JSON.parse(files.get("runner/package.json")!).dependencies).toHaveProperty("@earendil-works/pi-coding-agent");
+    // Deleted scripts must not be in the archive
+    for (const gone of ["prepare.sh", "clone.sh", "scrub-credentials.sh", "lockdown.sh", "write-manifest.mjs"]) {
+      expect([...files.keys()]).not.toContain(gone);
+    }
 
-    const digest = manifestDigest({ profile: "default", created_at: "", repos: heads });
-    expect(built.layout).toEqual(LAYOUT);
-    expect(manifestDigest(built.manifest)).toBe(digest);
+    expect(manifestDigest(uploadedManifest)).toBe(manifestDigest({ profile: "default", created_at: "", repos: heads }));
   });
 
   it("never uploads the token when the install phase fails", async () => {
     fake.exec_ = (id, command) =>
-      command.includes("prepare.sh install") ? [out("prepare: runner self-test failed\n", "stderr"), exit(1)] : prepareExec(id, command);
-    await expect(provider().buildSnapshot({ profile, heads, snapshotName: NAME })).rejects.toThrow("prepare.sh install exited 1: prepare: runner self-test failed");
+      command.includes("install-tools.sh") ? [out("install-tools: missing tools\n", "stderr"), exit(1)] : prepareExec(id, command);
+    await expect(buildSnapshot(client(), { profile, heads, snapshotName: NAME })).rejects.toThrow("install-tools.sh");
     expect(fake.calls.some((c) => c.op === "upload" && c.path.includes("/creds/"))).toBe(false);
-    expect(fake.commands().some((c) => c.includes("prepare.sh checkout"))).toBe(false);
     expect(fake.calls.filter((c) => c.op === "terminate").map((c) => c.id)).toEqual(["sbx-1"]);
   });
 
   it("rejects an invalid snapshotName", async () => {
     fake.exec_ = prepareExec;
-    await expect(provider().buildSnapshot({ profile, heads, snapshotName: "bad name!" })).rejects.toThrow("not [A-Za-z0-9_.-]+");
+    await expect(buildSnapshot(client(), { profile, heads, snapshotName: "bad name!" })).rejects.toThrow("not [A-Za-z0-9_.-]+");
   });
 });
 
-describe("RenderProvider.pruneSnapshots", () => {
-  it("keeps the newest two and deletes the rest with the same name", async () => {
-    fake.exec_ = prepareExec;
-    const p = provider();
-    await p.buildSnapshot({ profile, heads, snapshotName: NAME });
-    await p.pruneSnapshots(NAME, 2);
+describe("pruneSnapshots", () => {
+  const built = { id: "snp-new", sandboxGroupId: "sbg-1" };
 
-    const list = fake.calls.find((c) => c.op === "snapshot.list");
-    expect(list).toBeDefined();
-    const deletes = fake.calls.filter((c) => c.op === "snapshot.delete");
-    expect(deletes).toHaveLength(0);
+  it("keeps the newest two and ignores snapshots with a different name", async () => {
+    await pruneSnapshots(client(), built, NAME, 2);
+    expect(fake.inputs("snapshot.list")).toHaveLength(1);
+    expect(fake.inputs("snapshot.delete")).toEqual([]);
   });
 
   it("deletes this name's snapshots beyond the newest two, following the list cursor past the first page", async () => {
-    fake.exec_ = prepareExec;
     const api = fake.api();
-    const p = provider(undefined, api);
-    await p.buildSnapshot({ profile, heads, snapshotName: NAME });
     const at = (ageMs: number) => new Date(Date.now() - ageMs).toISOString();
     const others = Array.from({ length: 100 }, (_, i) => ({ snapshot: snapshot(`snp-other-${i}`, "available", "someone-else"), cursor: `o${i}` }));
     api.snapshots.list = async (input) => {
@@ -389,32 +386,19 @@ describe("RenderProvider.pruneSnapshots", () => {
         { snapshot: { ...snapshot("snp-2", "available", NAME), requestedAt: at(2000) }, cursor: "c" },
       ];
     };
-    await p.pruneSnapshots(NAME, 2);
+    await pruneSnapshots(client(undefined, api), built, NAME, 2);
 
     expect(fake.inputs("snapshot.list").map((i) => (i as { cursor?: string }).cursor)).toEqual([undefined, "o99"]);
     expect(fake.inputs("snapshot.delete")).toEqual([{ sandboxGroupId: "sbg-1", snapshotId: "snp-1" }]);
   });
-
-  it("ignores snapshots with a different name", async () => {
-    fake.exec_ = prepareExec;
-    const p = provider();
-    await p.buildSnapshot({ profile, heads, snapshotName: NAME });
-    await p.pruneSnapshots(NAME, 2);
-    const deletes = fake.calls.filter((c) => c.op === "snapshot.delete");
-    expect(deletes).toHaveLength(0);
-  });
 });
 
-describe("RenderProvider.createInvestigationSandbox", () => {
+describe("openRenderSandbox", () => {
   it("creates a sandbox by snapshot name with the configured policy and timeout", async () => {
     fake.exec_ = prepareExec;
-    const p = provider();
-    await p.buildSnapshot({ profile, heads, snapshotName: NAME });
-    fake.calls = [];
-
-    const sbx = await p.createInvestigationSandbox({ snapshotName: NAME });
-    expect(sbx.layout).toEqual(LAYOUT);
-    expect(sbx.manifest).toBeDefined();
+    const sbx = await openRenderSandbox(client(), NAME);
+    expect(sbx).toMatchObject(LAYOUT);
+    expect(sbx.manifest.repos).toEqual(fake.manifest().repos);
     expect(sbx.info).toMatchObject({
       runAs: "investigator",
       runnerNonDumpable: true,
@@ -440,27 +424,21 @@ describe("RenderProvider.createInvestigationSandbox", () => {
   it("throws SnapshotUnavailableError when no snapshot with that name is available", async () => {
     fake.createError = (input) =>
       input?.snapshotName ? new SandboxSnapshotNotFoundError("snapshot not found", 404) : undefined;
-    await expect(provider().createInvestigationSandbox({ snapshotName: "no-such-snap" })).rejects.toBeInstanceOf(
+    await expect(openRenderSandbox(client(), "no-such-snap")).rejects.toBeInstanceOf(
       SnapshotUnavailableError,
     );
   });
 
   it("terminates the sandbox when verify fails", async () => {
-    fake.exec_ = (_id, command) =>
-      command.includes("verify.sh")
-        ? [out("verify: egress to https://example.com is allowed\n", "stderr"), exit(1)]
-        : prepareExec(_id, command);
-    const p = provider({ default: "deny-all" });
-    await p.buildSnapshot({ profile, heads, snapshotName: NAME });
-    fake.calls = [];
-
-    await expect(p.createInvestigationSandbox({ snapshotName: NAME })).rejects.toThrow("verify.sh exited 1");
+    fake.exec_ = (id, command) =>
+      command.includes("verify.sh") ? [out("verify: egress to https://example.com is allowed\n", "stderr"), exit(1)] : prepareExec(id, command);
+    await expect(openRenderSandbox(client({ default: "deny-all" }), NAME)).rejects.toThrow("verify.sh exited 1");
     expect(fake.calls.filter((c) => c.op === "terminate")).toHaveLength(1);
   });
 
   it("refuses to create when the policy is allow-list with no domains", async () => {
     await expect(
-      provider({ default: "allow-list", allowedDomains: [] }).createInvestigationSandbox({ snapshotName: NAME }),
+      openRenderSandbox(client({ default: "allow-list", allowedDomains: [] }), NAME),
     ).rejects.toThrow("allow-list policy and no domains");
   });
 
@@ -468,11 +446,7 @@ describe("RenderProvider.createInvestigationSandbox", () => {
     fake.exec_ = prepareExec;
     fake.createError = (input) =>
       input?.snapshotName ? new ClientError("Failed to create sandbox: invalid networkPolicy", 400) : undefined;
-    const p = provider();
-    await p.buildSnapshot({ profile, heads, snapshotName: NAME });
-    fake.calls = [];
-
-    await expect(p.createInvestigationSandbox({ snapshotName: NAME })).rejects.toThrow(/SANDBOX_NETWORK_POLICY=allow-all/);
+    await expect(openRenderSandbox(client(), NAME)).rejects.toThrow(/SANDBOX_NETWORK_POLICY=allow-all/);
   });
 });
 
@@ -520,9 +494,10 @@ describe("resolveWorkspaceId", () => {
   });
 });
 
-describe("createProvider", () => {
-  it("defaults to the Render provider on Render and to the local provider elsewhere", async () => {
-    await expect(createProvider({ RENDER: "true" })).rejects.toThrow("RENDER_API_KEY is required");
-    expect((await createProvider({})).name).toBe("local");
+describe("configureSandboxes", () => {
+  it("defaults to Render on Render and to local sandboxes elsewhere", async () => {
+    await expect(configureSandboxes({ RENDER: "true" })).rejects.toThrow("RENDER_API_KEY is required");
+    await expect(configureSandboxes({})).resolves.toBeTypeOf("function");
+    await expect(configureSandboxes({ SANDBOX_PROVIDER: "nope" })).rejects.toThrow('SANDBOX_PROVIDER must be "render" or "local"');
   });
 });

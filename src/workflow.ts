@@ -1,33 +1,10 @@
 import { providerApiKey, RunnerInput } from "./types.ts";
 import config from "../config.ts";
-import { createProvider } from "./sandbox.ts";
+import { configureSandboxes } from "./sandbox/index.ts";
 import { task, type TaskContext } from "@renderinc/sdk/workflows";
 import { z } from "zod";
-import { answerQuestion, deliverCallback, investigateTask, type InvestigateInput, type InvestigateResult, type DeliverInput } from "./investigate.ts";
-
-export type Fields = Record<string, unknown>;
-
-export type Log = {
-  info(msg: string, fields?: Fields): void;
-  warn(msg: string, fields?: Fields): void;
-  error(msg: string, fields?: Fields): void;
-  child(fields: Fields): Log;
-};
-
-const serialize = (_key: string, value: unknown) =>
-  value instanceof Error ? { name: value.name, message: value.message } : value;
-
-/** One JSON object per line; Render captures task stdout. */
-export function createLog(base: Fields = {}, write = (line: string) => void process.stdout.write(`${line}\n`)): Log {
-  const emit = (level: string) => (msg: string, fields?: Fields) =>
-    write(JSON.stringify({ level, msg, ...base, ...fields }, serialize));
-  return {
-    info: emit("info"),
-    warn: emit("warn"),
-    error: emit("error"),
-    child: (fields) => createLog({ ...base, ...fields }, write),
-  };
-}
+import { answerQuestion, deliverCallback, investigateTask, type InvestigateInput, type InvestigateResult, type DeliverInput } from "./tasks.ts";
+import { createLog } from "./log.ts";
 
 const MINUTE = 60_000;
 
@@ -129,7 +106,7 @@ const investigateSubtask = task(
       config,
       snapshotName: config.snapshotName,
       log,
-      createProvider: (allowedDomain) => createProvider(process.env, allowedDomain),
+      configureSandboxes: (allowedDomain) => configureSandboxes(process.env, allowedDomain),
     }, input);
   },
 );

@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import type { Pi } from "./main.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { errorMessage } from "../types.ts";
 
 
 /*
@@ -330,7 +331,7 @@ function withFallbackHint(pi: Pi, tool: ToolDefinition<any, any>, hint: string) 
       try {
         return await tool.execute(toolCallId, params, signal, onUpdate, ctx);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         throw new Error(/not available and could not be downloaded/.test(message) ? `${message}. ${hint}` : message);
       }
     },

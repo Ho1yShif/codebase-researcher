@@ -1,8 +1,8 @@
-# Three services for support-triage-bot: Slack endpoint, the answer_question workflow, and the snapshot
+# Three services for code-investigator: Slack endpoint, the answer_question workflow, and the snapshot
 # refresh cron. Region is oregon because Sandboxes early access runs only there. No database.
 
 envVarGroups:
-  - name: support-triage-bot-shared
+  - name: code-investigator-shared
     envVars:
       - key: RENDER_API_KEY
         sync: false
@@ -12,7 +12,7 @@ envVarGroups:
 
 services:
   - type: web
-    name: support-triage-bot-api
+    name: code-investigator-api
     runtime: node
     region: oregon
     # Paid instance: a free instance spins down and misses Slack's 3-second deadline.
@@ -21,7 +21,7 @@ services:
     startCommand: pnpm start:api
     healthCheckPath: /healthz
     buildFilter:
-      paths: [src/api.ts, src/slack.ts, src/types.ts, config.ts, package.json, pnpm-lock.yaml]
+      paths: [src/api.ts, src/slack.ts, src/types.ts, src/callback.ts, config.ts, package.json, pnpm-lock.yaml]
     envVars:
       - key: API_TOKEN
         generateValue: true
@@ -33,21 +33,21 @@ services:
         sync: false
       - key: SLACK_CALLBACK_KEY
         generateValue: true
-      - fromGroup: support-triage-bot-shared
+      - fromGroup: code-investigator-shared
       - key: WORKFLOW_SLUG
         fromService:
           type: workflow
-          name: support-triage-bot-workflow
+          name: code-investigator-workflow
           property: slug
 
   - type: workflow
-    name: support-triage-bot-workflow
+    name: code-investigator-workflow
     runtime: node
     region: oregon
     buildCommand: pnpm install --frozen-lockfile
     startCommand: pnpm start:workflow
     buildFilter:
-      paths: [src/**, sandbox/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
+      paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
     # Env groups aren't linked to workflow services, so the shared values are declared here directly.
     envVars:
       - key: RENDER_API_KEY
@@ -68,18 +68,16 @@ services:
         value: allow-list
 
   - type: cron
-    name: support-triage-bot-snapshots
+    name: code-investigator-snapshots
     runtime: node
     region: oregon
     plan: starter
     schedule: "0 * * * *"
-    buildCommand: pnpm install --frozen-lockfile && pnpm build:runner
+    buildCommand: pnpm install --frozen-lockfile
     startCommand: pnpm refresh
     buildFilter:
-      paths: [src/**, sandbox/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
+      paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
     envVars:
-      - fromGroup: support-triage-bot-shared
-      - key: SANDBOX_PROVIDER
-        value: render
+      - fromGroup: code-investigator-shared
       - key: GITHUB_TOKEN
         sync: false

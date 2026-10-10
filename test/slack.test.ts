@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { Hono } from "hono";
 import { parseSlackEvent, verifySlackSignature, escapeMrkdwn, truncate, evidenceUrl, formatReply, react, unreact, swapEyesForResult, postReply, findPostedReply, REPLY_EVENT_TYPE, fetchTranscript, compareTs, slackTsToIso, mountSlackRoutes, type SlackDeps } from "../src/slack.ts";
-import { signCallback, type Reply, type StartQuestion } from "../src/types.ts";
+import { signCallback } from "../src/callback.ts";
+import type { Reply, StartQuestion } from "../src/types.ts";
 import { createHmac } from "node:crypto";
 import type { Evidence, FinalAnswer } from "../src/types.ts";
 import config from "../config.ts";
@@ -460,7 +461,7 @@ describe("fetchTranscript", () => {
   });
 
   it("strips named bot mentions (<@UBOT|botname>)", async () => {
-    const parent = slack.seed({ channel: CH, user: "UHUMAN", text: "<@UBOT|support-triage-bot> what's up?" });
+    const parent = slack.seed({ channel: CH, user: "UHUMAN", text: "<@UBOT|code-investigator> what's up?" });
     const transcript = await fetchTranscript(slack, CH, parent.ts);
     expect(transcript[0]!.text).toBe("what's up?");
   });

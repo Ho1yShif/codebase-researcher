@@ -1,11 +1,11 @@
 import type { Evidence, InvestigationResult, RunnerEvent } from "../src/types.ts";
 import { defineConfig } from "../src/types.ts";
-import type { SandboxProvider } from "../src/sandbox.ts";
-import { createFakeSlack, FakeProvider } from "./fakes.ts";
+import { createFakeSlack, FakeSandboxes } from "./fakes.ts";
 import { describe, expect, it } from "vitest";
-import { loadConfig, createLog } from "../src/workflow.ts";
-import { answerQuestion, investigateTask, deliverCallback } from "../src/investigate.ts";
-import type { AnswerQuestionDeps, InvestigateResult, InvestigateDeps, DeliverInput } from "../src/investigate.ts";
+import { loadConfig } from "../src/workflow.ts";
+import { createLog } from "../src/log.ts";
+import { answerQuestion, investigateTask, deliverCallback } from "../src/tasks.ts";
+import type { AnswerQuestionDeps, InvestigateResult, InvestigateDeps, DeliverInput } from "../src/tasks.ts";
 import { createServer } from "node:http";
 
 const at = () => new Date().toISOString();
@@ -55,7 +55,7 @@ const success = (result: InvestigationResult = answer): Script => ({
 const TRANSCRIPT = [{ text: "Does render deploy retry?", author: "U1" }];
 
 function harness(env: Record<string, string> = {}) {
-  const provider = new FakeProvider();
+  const sandboxes = new FakeSandboxes();
   const logs: Record<string, unknown>[] = [];
   const config = loadConfig(env);
   const log = createLog({}, (line: string) => void logs.push(JSON.parse(line)));
@@ -66,7 +66,7 @@ function harness(env: Record<string, string> = {}) {
       config,
       snapshotName: config.snapshotName,
       log,
-      createProvider: async () => provider as SandboxProvider,
+      configureSandboxes: async () => sandboxes.open,
     };
   }
 
@@ -76,13 +76,13 @@ function harness(env: Record<string, string> = {}) {
     runInvestigate: (input) => investigateTask(invDeps(), input),
     runDeliver: async (input) => { deliveries.push(input); },
   };
-  return { provider, logs, deps, config, log, invDeps, deliveries };
+  return { sandboxes, logs, deps, config, log, invDeps, deliveries };
 }
 
 describe("answerQuestion", () => {
   it("happy path: returns an answer reply", async () => {
     const h = harness();
-    h.provider.script(success());
+    h.sandboxes.script(success());
 
     const result = await answerQuestion(h.deps, "trace-1", {
       transcript: TRANSCRIPT,
@@ -91,12 +91,12 @@ describe("answerQuestion", () => {
     expect(result.outcome).toBe("answer");
     expect(result.reply.kind).toBe("answer");
     expect(result.reply.traceId).toBe("trace-1");
-    expect(h.provider.terminated).toEqual(["sbx-1"]);
+    expect(h.sandboxes.closed).toEqual(["sbx-1"]);
   });
 
   it("returns a clarification reply", async () => {
     const h = harness();
-    h.provider.script(success(clarification));
+    h.sandboxes.script(success(clarification));
 
     const result = await answerQuestion(h.deps, "trace-2", {
       transcript: TRANSCRIPT,
@@ -108,7 +108,7 @@ describe("answerQuestion", () => {
 
   it("returns failure reply when investigate fails", async () => {
     const h = harness();
-    h.provider.script({ events: [events.started(), events.error("agent_error")] });
+    h.sandboxes.script({ events: [events.started(), events.error("agent_error")] });
 
     const result = await answerQuestion(h.deps, "trace-3", {
       transcript: TRANSCRIPT,
@@ -138,7 +138,7 @@ describe("answerQuestion", () => {
 
   it("runs deliver when callback is present", async () => {
     const h = harness();
-    h.provider.script(success());
+    h.sandboxes.script(success());
 
     const result = await answerQuestion(h.deps, "trace-cb", {
       transcript: TRANSCRIPT,
@@ -157,7 +157,7 @@ describe("answerQuestion", () => {
 
   it("does not run deliver when no callback", async () => {
     const h = harness();
-    h.provider.script(success());
+    h.sandboxes.script(success());
 
     await answerQuestion(h.deps, "trace-nocb", { transcript: TRANSCRIPT });
     expect(h.deliveries).toHaveLength(0);
@@ -165,7 +165,7 @@ describe("answerQuestion", () => {
 
   it("deliver failure does not fail the task", async () => {
     const h = harness();
-    h.provider.script(success());
+    h.sandboxes.script(success());
     const deps: AnswerQuestionDeps = {
       ...h.deps,
       runDeliver: async () => { throw new Error("deliver exploded"); },
@@ -237,41 +237,40 @@ describe("deliverCallback", () => {
 describe("investigate", () => {
   it("returns failed for agent errors without throwing", async () => {
     const h = harness();
-    h.provider.script({ events: [events.started(), events.error("agent_error")] });
+    h.sandboxes.script({ events: [events.started(), events.error("agent_error")] });
 
     const result = await investigateTask(h.invDeps(), { transcript: [], trace_id: "t1" });
     expect(result.kind).toBe("failed");
-    expect(h.provider.terminated).toEqual(["sbx-1"]);
+    expect(h.sandboxes.closed).toEqual(["sbx-1"]);
   });
 
   it("returns failed for missing snapshot without throwing", async () => {
     const h = harness();
-    h.provider.noSnapshot = true;
+    h.sandboxes.noSnapshot = true;
 
     const result = await investigateTask(h.invDeps(), { transcript: [], trace_id: "t2" });
-    expect(result.kind).toBe("failed");
-    if (result.kind === "failed") {
-      expect(result.code).toBe("no_snapshot");
-      expect(result.reason).toContain("repository snapshot isn't ready yet");
-    }
+    expect(result).toEqual({ kind: "failed", code: "no_snapshot" });
+
+    const { reply } = await answerQuestion(h.deps, "t2", { transcript: TRANSCRIPT });
+    expect(reply.kind === "failure" && reply.reason).toContain("repository snapshot isn't ready yet");
   });
 
   it("throws for infra errors so the subtask retries", async () => {
     const h = harness();
-    h.provider.script({ throws: new Error("sandbox exec reset") });
+    h.sandboxes.script({ throws: new Error("sandbox exec reset") });
 
     await expect(
       investigateTask(h.invDeps(), { transcript: [], trace_id: "t3" }),
     ).rejects.toThrow("sandbox exec reset");
-    expect(h.provider.terminated).toEqual(["sbx-1"]);
+    expect(h.sandboxes.closed).toEqual(["sbx-1"]);
   });
 
   it("always terminates the sandbox", async () => {
     const h = harness();
-    h.provider.script(success());
+    h.sandboxes.script(success());
 
     await investigateTask(h.invDeps(), { transcript: [], trace_id: "t4" });
-    expect(h.provider.terminated).toEqual(["sbx-1"]);
+    expect(h.sandboxes.closed).toEqual(["sbx-1"]);
   });
 
   it("returns failed with misconfigured for unknown model", async () => {
@@ -281,11 +280,11 @@ describe("investigate", () => {
     expect(result).toMatchObject({ kind: "failed", code: "misconfigured" });
   });
 
-  it("returns failed with misconfigured when provider setup throws", async () => {
+  it("returns failed with misconfigured when sandbox setup throws", async () => {
     const h = harness();
     const deps: InvestigateDeps = {
       ...h.invDeps(),
-      createProvider: async () => { throw new Error("RENDER_API_KEY is required"); },
+      configureSandboxes: async () => { throw new Error("RENDER_API_KEY is required"); },
     };
 
     const result = await investigateTask(deps, { transcript: [], trace_id: "t6" });
@@ -343,7 +342,7 @@ describe("defineConfig", () => {
 
   it("defaults the snapshot name and keeps the configured repos", () => {
     const c = defineConfig(raw, {});
-    expect(c.snapshotName).toBe("support-triage-bot-corpus");
+    expect(c.snapshotName).toBe("code-investigator-corpus");
     expect(c.repos).toEqual([{ repository: "acme/api" }]);
   });
 

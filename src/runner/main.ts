@@ -3,11 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { RUNNER_EXIT, RunnerInput, ALL_PROVIDER_KEY_ENV, providerApiKey } from "../types.ts";
+import { RUNNER_EXIT, RunnerInput, ALL_PROVIDER_KEY_ENV, errorMessage, providerApiKey } from "../types.ts";
 import type { RunnerEvent, Usage } from "../types.ts";
 import { defaultFauxScript, registerFauxModel } from "./faux.ts";
 import type { FauxScript } from "./faux.ts";
-import { runInvestigation, PROMPT_VERSION } from "./run.ts";
+import { runSession, PROMPT_VERSION } from "./session.ts";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { Usage as PiUsage } from "@earendil-works/pi-ai";
 import type * as PiSdk from "@earendil-works/pi-coding-agent";
@@ -231,7 +231,7 @@ export async function main(argv: string[], io: MainIO = processIO()): Promise<nu
     } else {
       return fail("agent_error", `no API key for provider "${provider}": pass --key-file or set the provider's env var`);
     }
-    return await runInvestigation({ pi, input, modelRuntime, model: capMaxTokens(model, input.thinking_level), emit, startedAt });
+    return await runSession({ pi, input, modelRuntime, model: capMaxTokens(model, input.thinking_level), emit, startedAt });
   } catch (err) {
     console.error(err);
     if (!emit.terminated) return fail("agent_error", errorMessage(err));
@@ -283,8 +283,6 @@ function isDirectory(path: string): boolean {
     return false;
   }
 }
-
-const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const code = await main(process.argv.slice(2));

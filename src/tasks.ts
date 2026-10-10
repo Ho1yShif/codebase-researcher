@@ -2,11 +2,10 @@ import {
   AnswerQuestionInput,
   RUNNER_EXIT,
   RunnerInput,
-  InvestigationResult,
   buildEvidenceUrl,
   toInternalTranscript,
-  signCallback,
   type Callback,
+  type InvestigationResult,
   type Evidence,
   type Reply,
   type RepoManifest,
@@ -14,98 +13,92 @@ import {
   type Transcript,
   type Usage,
 } from "./types.ts";
-import {
-  SnapshotUnavailableError,
-  type InvestigationSandbox,
-  type SandboxProvider,
-  type RunInvestigationResult,
-} from "./sandbox.ts";
+import { SnapshotUnavailableError, type OpenSandbox, type RunInvestigationResult, type Sandbox } from "./sandbox/index.ts";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
+import { signCallback } from "./callback.ts";
+import type { Log } from "./log.ts";
 import type { Config } from "./workflow.ts";
-import type { Log } from "./workflow.ts";
 
-type Started = Extract<RunnerEvent, { type: "started" }>;
 export type RunnerErrorCode = Extract<RunnerEvent, { type: "error" }>["code"];
 
-/** Folds the runner's event stream into what the workflow records. */
-export class RunCapture {
-  started?: Started;
+export type RunCapture = {
+  started?: Extract<RunnerEvent, { type: "started" }>;
   result?: { value: InvestigationResult; at: string };
   error?: { code: RunnerErrorCode; message: string };
   usage?: Usage;
+};
 
-  add(event: RunnerEvent): void {
+/** Folds the runner's event stream into what the workflow records. */
+export function captureRun(events: RunnerEvent[]): RunCapture {
+  const capture: RunCapture = {};
+  for (const event of events) {
     switch (event.type) {
       case "started":
-        this.started ??= event;
+        capture.started ??= event;
         break;
       case "usage":
-        this.usage = addUsage(this.usage, event.usage);
+        capture.usage = addUsage(capture.usage, event.usage);
         break;
-      case "result": {
-        const parsed = InvestigationResult.safeParse(event.result);
-        if (parsed.success) this.result = { value: parsed.data, at: event.at };
-        else this.error ??= { code: "invalid_submission", message: parsed.error.message };
+      case "result":
+        capture.result = { value: event.result, at: event.at };
         break;
-      }
       case "error":
-        this.error ??= { code: event.code, message: event.message };
+        capture.error ??= { code: event.code, message: event.message };
         break;
     }
   }
+  return capture;
 }
 
+const TOKEN_KEYS = ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"] as const;
+
 function addUsage(total: Usage | undefined, next: Usage): Usage {
-  const sum = (key: "input_tokens" | "output_tokens" | "cache_read_tokens" | "cache_write_tokens") =>
-    (total?.[key] ?? 0) + next[key];
-  const noCost = total?.cost_usd === undefined && next.cost_usd === undefined;
-  return {
-    input_tokens: sum("input_tokens"),
-    output_tokens: sum("output_tokens"),
-    cache_read_tokens: sum("cache_read_tokens"),
-    cache_write_tokens: sum("cache_write_tokens"),
-    cost_usd: noCost ? undefined : (total?.cost_usd ?? 0) + (next.cost_usd ?? 0),
-  };
+  const sum: Usage = { ...next };
+  for (const key of TOKEN_KEYS) sum[key] = (total?.[key] ?? 0) + next[key];
+  if (total?.cost_usd !== undefined || next.cost_usd !== undefined) {
+    sum.cost_usd = (total?.cost_usd ?? 0) + (next.cost_usd ?? 0);
+  }
+  return sum;
 }
 
 export type FailureCode = RunnerErrorCode | "retries_exhausted" | "misconfigured" | "no_snapshot";
 
-const KILLED_BY_TIMEOUT = 124;
-const KILLED = 137;
+const EXIT_TIMEOUT = 124; // coreutils `timeout`
+const EXIT_SIGKILL = 137;
 
 export type RunVerdict =
   | { kind: "result"; value: InvestigationResult; at: string }
-  | { kind: "failed"; code: FailureCode; message: string }
-  | { kind: "infra"; message: string };
+  | { kind: "failed"; code: FailureCode; message: string };
 
+/** Throws when the sandbox, not the agent, failed, so the workflow retries. */
 export function classifyRun(
   run: RunInvestigationResult,
   capture: RunCapture,
-  opts: { elapsedMs: number; agentTimeoutMs: number },
+  { elapsedMs, agentTimeoutMs }: { elapsedMs: number; agentTimeoutMs: number },
 ): RunVerdict {
   if (capture.result) return { kind: "result", ...capture.result };
   if (capture.error) return { kind: "failed", ...capture.error };
-  const stderr = run.stderrTail ? `: ${run.stderrTail}` : "";
-  const lost: RunVerdict = { kind: "infra", message: `lost the runner's exec stream before it exited${stderr}` };
-  const timeout: RunVerdict = { kind: "failed", code: "timeout", message: `runner killed after ${opts.agentTimeoutMs}ms` };
-  if (run.streamLost) return lost;
-  if (run.aborted) return timeout;
+
   const exit = run.exitCode;
-  if (exit === null) return lost;
-  if (exit === KILLED_BY_TIMEOUT || exit === RUNNER_EXIT.timeout) return timeout;
-  if (exit === KILLED) {
-    return opts.elapsedMs >= opts.agentTimeoutMs
-      ? timeout
-      : { kind: "infra", message: `runner was killed after ${opts.elapsedMs}ms (out of memory or killed by the sandbox)${stderr}` };
+  const timedOut =
+    run.aborted ||
+    exit === EXIT_TIMEOUT ||
+    exit === RUNNER_EXIT.timeout ||
+    (exit === EXIT_SIGKILL && elapsedMs >= agentTimeoutMs);
+  if (timedOut) return { kind: "failed", code: "timeout", message: `runner killed after ${agentTimeoutMs}ms` };
+
+  const stderr = run.stderrTail && `: ${run.stderrTail}`;
+  if (exit !== null && exit < 128) {
+    return { kind: "failed", code: "agent_error", message: `runner exited (${exit}) without a result${stderr}` };
   }
-  if (exit >= 128) return { kind: "infra", message: `runner died from signal ${exit - 128}${stderr}` };
-  return { kind: "failed", code: "agent_error", message: `runner exited (${exit}) without a result${stderr}` };
+  const why =
+    exit === null ? "lost the runner's exec stream before it exited"
+    : exit === EXIT_SIGKILL ? `runner was killed after ${elapsedMs}ms (out of memory or killed by the sandbox)`
+    : `runner died from signal ${exit - 128}`;
+  throw new Error(why + stderr);
 }
 
-export const verdictLabel = (v: RunVerdict) =>
-  v.kind === "result" ? v.value.status : v.kind === "failed" ? v.code : "infra";
-
-export function failureReason(code: string | null, agentTimeoutMs: number): string {
+export function failureReason(code: FailureCode, agentTimeoutMs: number): string {
   switch (code) {
     case "timeout":
       return `the investigation hit the ${Math.round(agentTimeoutMs / 60_000)}-minute limit`;
@@ -120,8 +113,6 @@ export function failureReason(code: string | null, agentTimeoutMs: number): stri
       return "the investigation service is misconfigured (an operator needs to check the workflow's settings)";
     case "no_snapshot":
       return "the repository snapshot isn't ready yet (the first build takes about 5 minutes); try again shortly";
-    default:
-      return "the investigation could not be completed";
   }
 }
 
@@ -136,32 +127,22 @@ export function filterEvidence(
     const repo = manifest.repos.find(
       (r) => r.repository.toLowerCase() === e.repository.toLowerCase() && r.commit.startsWith(e.commit),
     );
-    if (repo) {
-      const browse = (repo as { browse?: string }).browse;
-      const repoUrl = (repo as { url?: string }).url;
-      kept.push({
-        repository: repo.repository,
-        commit: repo.commit,
-        path: e.path,
-        start_line: e.start_line,
-        end_line: e.end_line,
-        url: buildEvidenceUrl({ ...e, repository: repo.repository, commit: repo.commit }, browse, repoUrl),
-      });
-    } else {
+    if (!repo) {
       dropped.push(e);
+      continue;
     }
+    const pinned = { ...e, repository: repo.repository, commit: repo.commit };
+    kept.push({ ...pinned, url: buildEvidenceUrl(pinned, repo.browse, repo.url) });
   }
   return { result: { ...result, evidence: kept }, dropped };
 }
 
 const MAX_STDERR_LOG = 2_048;
-const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
 export type InvestigateInput = { transcript: Transcript; trace_id: string };
 
 export type InvestigateResult =
   | { kind: "result"; result: InvestigationResult; model: string; prompt_version: string; usage?: Usage; manifest_created_at: string; repos: Array<{ repository: string; commit: string }> }
-  | { kind: "failed"; code: string; reason: string };
+  | { kind: "failed"; code: FailureCode };
 
 export type DeliverInput = {
   callback: Callback;
@@ -197,11 +178,7 @@ export async function answerQuestion(
     investigateResult = await deps.runInvestigate({ transcript, trace_id: traceId });
   } catch (err) {
     log.error("investigation failed", { trace_id: traceId, err });
-    investigateResult = {
-      kind: "failed",
-      code: "retries_exhausted",
-      reason: failureReason("retries_exhausted", config.agentTimeoutMs),
-    };
+    investigateResult = { kind: "failed", code: "retries_exhausted" };
   }
 
   let reply: Reply;
@@ -217,7 +194,7 @@ export async function answerQuestion(
           manifestCreatedAt: investigateResult.manifest_created_at,
         };
   } else {
-    reply = { kind: "failure", traceId, reason: investigateResult.reason };
+    reply = { kind: "failure", traceId, reason: failureReason(investigateResult.code, config.agentTimeoutMs) };
   }
 
   if (input.callback) {
@@ -274,7 +251,7 @@ export type InvestigateDeps = {
   config: Config;
   snapshotName: string;
   log: Log;
-  createProvider: (allowedDomain: string) => Promise<SandboxProvider>;
+  configureSandboxes: (allowedDomain: string) => Promise<OpenSandbox>;
 };
 
 export async function investigateTask(
@@ -286,27 +263,26 @@ export async function investigateTask(
   const record = getBuiltinModel(config.modelProvider as never, config.model as never);
   if (!record) {
     log.warn("unknown model", { event: "workflow_misconfigured", provider: config.modelProvider, model: config.model });
-    return { kind: "failed", code: "misconfigured", reason: failureReason("misconfigured", config.agentTimeoutMs) };
+    return { kind: "failed", code: "misconfigured" };
   }
   const allowedDomain = new URL(record.baseUrl).hostname;
 
-  let provider: SandboxProvider;
+  let openSandbox: OpenSandbox;
   try {
-    provider = await deps.createProvider(allowedDomain);
+    openSandbox = await deps.configureSandboxes(allowedDomain);
   } catch (err) {
-    log.warn("provider setup failed", { event: "workflow_misconfigured", err });
-    return { kind: "failed", code: "misconfigured", reason: failureReason("misconfigured", config.agentTimeoutMs) };
+    log.warn("sandbox setup failed", { event: "workflow_misconfigured", err });
+    return { kind: "failed", code: "misconfigured" };
   }
 
-  let sandbox: InvestigationSandbox;
+  let sandbox: Sandbox;
   try {
-    sandbox = await provider.createInvestigationSandbox({ snapshotName });
+    sandbox = await openSandbox(snapshotName);
   } catch (err) {
-    if (err instanceof SnapshotUnavailableError) {
-      return { kind: "failed", code: "no_snapshot", reason: failureReason("no_snapshot", config.agentTimeoutMs) };
-    }
+    if (err instanceof SnapshotUnavailableError) return { kind: "failed", code: "no_snapshot" };
     throw err;
   }
+  log.info("sandbox ready", { sandbox_id: sandbox.id, ...sandbox.info });
 
   try {
     const redact = (text: string) => (config.modelApiKey ? text.replaceAll(config.modelApiKey, "[redacted]") : text);
@@ -314,56 +290,46 @@ export async function investigateTask(
       trace_id: input.trace_id,
       transcript: input.transcript,
       manifest: sandbox.manifest,
-      repos_root: sandbox.layout.reposRoot,
-      scratch_dir: sandbox.layout.scratchDir,
+      repos_root: sandbox.reposRoot,
+      scratch_dir: sandbox.scratchDir,
       model_provider: config.modelProvider,
       model: config.model,
       thinking_level: config.thinkingLevel,
       timeout_ms: config.agentTimeoutMs,
     });
 
-    const capture = new RunCapture();
     const startedAt = Date.now();
-    const run = await provider.runInvestigation(sandbox, {
+    const run = await sandbox.run({
       input: runnerInput,
       modelApiKey: config.modelApiKey,
       timeoutMs: config.agentTimeoutMs,
-      onEvent: (event: RunnerEvent) => { capture.add(event); },
       onStderr: (chunk: string) => {
         const text = redact(chunk);
         const truncated = Math.max(text.length - MAX_STDERR_LOG, 0);
         log.info("runner stderr", { chunk: text.slice(0, MAX_STDERR_LOG), ...(truncated && { truncated }) });
       },
     });
-    const endedAt = Date.now();
+    const capture = captureRun(run.events);
     const verdict = classifyRun(
       { ...run, stderrTail: redact(run.stderrTail).slice(-MAX_STDERR_LOG) },
       capture,
-      { elapsedMs: endedAt - startedAt, agentTimeoutMs: config.agentTimeoutMs },
+      { elapsedMs: Date.now() - startedAt, agentTimeoutMs: config.agentTimeoutMs },
     );
+    if (verdict.kind === "failed") return { kind: "failed", code: verdict.code };
 
-    switch (verdict.kind) {
-      case "result": {
-        const { result, dropped } = filterEvidence(verdict.value, runnerInput.manifest);
-        if (dropped.length > 0) log.warn("dropped evidence not in the sandbox manifest", { dropped });
-        const model = capture.started?.model ?? config.model;
-        return {
-          kind: "result",
-          result,
-          model,
-          prompt_version: capture.started?.prompt_version ?? "unknown",
-          usage: capture.usage,
-          manifest_created_at: sandbox.manifest.created_at,
-          repos: sandbox.manifest.repos.map((r) => ({ repository: r.repository, commit: r.commit })),
-        };
-      }
-      case "failed":
-        return { kind: "failed", code: verdict.code, reason: failureReason(verdict.code, config.agentTimeoutMs) };
-      case "infra":
-        throw new Error(verdict.message);
-    }
+    const { result, dropped } = filterEvidence(verdict.value, runnerInput.manifest);
+    if (dropped.length > 0) log.warn("dropped evidence not in the sandbox manifest", { dropped });
+    return {
+      kind: "result",
+      result,
+      model: capture.started?.model ?? config.model,
+      prompt_version: capture.started?.prompt_version ?? "unknown",
+      usage: capture.usage,
+      manifest_created_at: sandbox.manifest.created_at,
+      repos: sandbox.manifest.repos.map((r) => ({ repository: r.repository, commit: r.commit })),
+    };
   } finally {
-    await provider.terminate(sandbox.id).catch((err: unknown) =>
+    await sandbox.close().catch((err: unknown) =>
       log.warn("could not terminate sandbox", { sandbox_id: sandbox.id, err }),
     );
   }

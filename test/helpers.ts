@@ -3,8 +3,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RunnerEvent } from "../src/types.ts";
 import type { RunnerInput } from "../src/types.ts";
-import { git } from "../src/sandbox.ts";
-import type { SandboxLayout } from "../src/sandbox.ts";
+import { git, REPO_ROOT } from "../src/sandbox/interface.ts";
+import { writeRunnerBundle } from "../src/sandbox/runner-bundle.ts";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
@@ -34,7 +34,7 @@ export async function commitAll(path: string, message: string): Promise<string> 
   return git(["rev-parse", "HEAD"], { cwd: path });
 }
 
-export function runnerInput(layout: SandboxLayout, model = "fake-model"): RunnerInput {
+export function runnerInput(layout: { reposRoot: string; scratchDir: string }, model = "fake-model"): RunnerInput {
   return {
     trace_id: "test-trace-00001",
     transcript: [{ ts: "1.0", user_id: "U1", is_agent: false, text: "does X happen?" }],
@@ -67,8 +67,15 @@ export function runnerReport(events: RunnerEvent[]): {
 }
 
 export const RUNNER_DIR = fileURLToPath(new URL("../src/runner/", import.meta.url));
-export const RUNNER = fileURLToPath(new URL("../sandbox/dist/runner.mjs", import.meta.url));
 export const REPO = "acme/widget";
+
+let runnerPath: string | undefined;
+
+/** Bundles the runner into a per-file dir under .scratch (inside the repo, so its externals resolve). */
+export async function buildRunner(): Promise<string> {
+  runnerPath = await writeRunnerBundle(join(REPO_ROOT, ".scratch", `test-runner-${randomUUID()}`));
+  return runnerPath;
+}
 
 export interface Fixture {
   reposRoot: string;
@@ -141,7 +148,8 @@ function expectSingleTerminal(events: RunnerEvent[]) {
 }
 
 export function runCli(args: string[], stdin: string, env: NodeJS.ProcessEnv = {}) {
-  const res = spawnSync(process.execPath, [RUNNER, ...args], {
+  if (!runnerPath) throw new Error("call buildRunner() in beforeAll first");
+  const res = spawnSync(process.execPath, [runnerPath, ...args], {
     input: stdin,
     encoding: "utf8",
     env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env },
