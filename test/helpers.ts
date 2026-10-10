@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RunnerEvent } from "../src/types.ts";
 import type { RunnerInput } from "../src/types.ts";
-import { git, REPO_ROOT } from "../src/sandbox/interface.ts";
+import { git } from "../src/sandbox/interface.ts";
 import { writeRunnerBundle } from "../src/sandbox/runner-bundle.ts";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -71,9 +71,9 @@ export const REPO = "acme/widget";
 
 let runnerPath: string | undefined;
 
-/** Bundles the runner into a per-file dir under .scratch (inside the repo, so its externals resolve). */
+/** Bundles the runner into a fresh temp dir, outside the repo, so no node_modules is reachable from it. */
 export async function buildRunner(): Promise<string> {
-  runnerPath = await writeRunnerBundle(join(REPO_ROOT, ".scratch", `test-runner-${randomUUID()}`));
+  runnerPath = await writeRunnerBundle(mkdtempSync(join(tmpdir(), "runner-bundle-")));
   return runnerPath;
 }
 

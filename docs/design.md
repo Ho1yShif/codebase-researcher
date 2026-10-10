@@ -46,11 +46,11 @@ The goal is to prevent the model (via the coding agent's tool calls) from readin
 
 **Filesystem isolation.** Repositories are cloned by a builder Sandbox with full egress. Before the snapshot, the lockdown step in `src/sandbox/render/snapshot.ts` transfers ownership to root, makes everything read-only, and gives the runner user write access only to a scratch directory. The runner binary (`node`) is installed as an execute-only copy, making the runner process non-dumpable: same-uid tool subprocesses cannot read its memory (which holds the model API key) through `/proc`.
 
-**Credential separation.** Git tokens exist only during the builder's clone phase. They arrive as per-host files uploaded after the install phase (which runs npm and the runner self-test, both of which execute third-party code). After cloning, `sandbox-runtime/build/scrub-credentials.sh` deletes the files and verifies that no token value appears in any git config, `.git/` directory, or global credential store. The snapshot is taken only after this verification passes. Per-question Sandboxes restored from the snapshot never see git tokens.
+**Credential separation.** Git tokens exist only during the builder's clone phase. They arrive as per-host files uploaded after the install phase (which runs the tool installer and the runner self-test, both of which execute third-party code). After cloning, `sandbox-runtime/build/scrub-credentials.sh` deletes the files and verifies that no token value appears in any git config, `.git/` directory, or global credential store. The snapshot is taken only after this verification passes. Per-question Sandboxes restored from the snapshot never see git tokens.
 
 The model API key is delivered to each investigation Sandbox as a one-time file. The runner reads it, deletes it, and removes every provider key var from `process.env` before starting the agent. Tool subprocesses inherit a clean environment built from an allowlist, so even if the agent constructs a command that reads environment variables, it finds nothing.
 
-**Network policy.** Investigation Sandboxes are created with an allow-list network policy containing only the model provider's API host (derived automatically from the model's base URL in Pi's registry). The builder always uses allow-all because it needs to reach git hosts and npm.
+**Network policy.** Investigation Sandboxes are created with an allow-list network policy containing only the model provider's API host (derived automatically from the model's base URL in Pi's registry). The builder always uses allow-all because it needs to reach git hosts (and nodejs.org or GitHub releases when the base image lacks Node or ripgrep).
 
 ### Known residual risk: DNS
 

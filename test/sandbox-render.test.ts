@@ -274,7 +274,7 @@ describe("buildSnapshot", () => {
     const built = await buildSnapshot(client(), { profile, heads, snapshotName: NAME });
     expect(built).toEqual({ id: "snp-new", sandboxGroupId: "sbg-1" });
 
-    // Credential upload must happen after install-tools + npm ci + self-test (which execute third-party code)
+    // Credential upload must happen after install-tools and the self-test (which execute third-party code)
     const tokenUpload = fake.calls.findIndex((c) => c.op === "upload" && c.path.includes("/creds/"));
     const installToolsExec = fake.calls.findIndex((c) => c.op === "exec" && c.command.includes("install-tools.sh"));
     const selfTestExec = fake.calls.findIndex((c) => c.op === "exec" && c.command.includes("--self-test"));
@@ -307,9 +307,8 @@ describe("buildSnapshot", () => {
     expect(uploadedManifest.profile).toBe("default");
     expect(uploadedManifest.repos).toHaveLength(2);
 
-    // npm ci runs inside a chained exec (not in prepare.sh)
-    expect(commands.some((c) => c.includes("npm ci --omit=dev --ignore-scripts"))).toBe(true);
-    expect(commands.every((c) => !c.match(/npm (install|i) /))).toBe(true);
+    // The runner is self-contained: nothing is installed with npm inside the sandbox
+    expect(commands.every((c) => !/\bnpm\b/.test(c))).toBe(true);
 
     const uploads = fake.calls.filter((c) => c.op === "upload");
     expect(uploads[0]!.contentType).toBe("application/x-tar");
@@ -335,13 +334,10 @@ describe("buildSnapshot", () => {
       "build/scrub-credentials.sh",
       "install-tools.sh",
       "run-investigation.sh",
-      "runner/package-lock.json",
-      "runner/package.json",
       "runner/runner.mjs",
       "verify.sh",
     ]);
     expect(files.get("runner/runner.mjs")).toContain("submit_investigation");
-    expect(JSON.parse(files.get("runner/package.json")!).dependencies).toHaveProperty("@earendil-works/pi-agent-core");
 
     // build/ scripts stay in the staging dir, which is deleted before verification and the snapshot
     expect(commands.some((c) => c.includes("cp /tmp/triage-stage/*.sh /opt/triage/app/"))).toBe(true);

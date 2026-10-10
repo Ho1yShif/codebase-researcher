@@ -19,7 +19,7 @@ sequenceDiagram
   participant Sbx as Investigation sandbox
 
   Cron->>Builder: create (allow-all egress)
-  Cron->>Builder: upload scripts and runner, install tools, npm ci, self-test
+  Cron->>Builder: upload scripts and runner, install tools, self-test
   Cron->>Builder: upload git credentials, clone, scrub credentials
   Cron->>Builder: lock down, verify.sh
   Cron->>Snap: snapshot as "<name>", prune older ones
@@ -37,15 +37,16 @@ The idea to take away: **expensive, privileged setup happens once, in a builder;
 
 **Essential.** [`buildSnapshot`](../src/sandbox/render/snapshot.ts) creates a builder sandbox with `allow-all` egress and a `timeoutSeconds` backstop, then drives it entirely through `upload` and `exec`:
 
-1. Upload one tar of everything the sandbox needs: the scripts in [`sandbox-runtime/`](../sandbox-runtime) and the runner, which [`bundleRunner`](../src/sandbox/runner-bundle.ts) builds into one JavaScript file on the spot.
-2. Install tools with [`install-tools.sh`](../sandbox-runtime/install-tools.sh), install the runner's three pinned npm packages, and run the runner's `--self-test`.
+1. Upload one tar of everything the sandbox needs: the scripts in [`sandbox-runtime/`](../sandbox-runtime) and the runner, which [`bundleRunner`](../src/sandbox/runner-bundle.ts) builds on the spot into one self-contained JavaScript file, packages included. The sandbox needs Node to run it, and nothing else: no npm, no `node_modules`.
+2. Install tools with [`install-tools.sh`](../sandbox-runtime/install-tools.sh) and run the runner's `--self-test`.
 3. Clone the repositories at exact commits.
 4. Write a manifest of what was cloned, lock the filesystem down, verify, snapshot.
 
 Two rules worth copying:
 
 - **Orchestrate from the host, script inside the sandbox.** The order of steps, timeouts, and error handling live in TypeScript, where you can test them with a fake API ([`test/sandbox-render.test.ts`](../test/sandbox-render.test.ts)). Anything long or security-critical that runs inside is a real `.sh` file you can read, shellcheck, and test locally ([`test/sandbox-runtime.test.ts`](../test/sandbox-runtime.test.ts)).
-- **Order steps by trust.** Third-party code (npm packages, the self-test) runs *before* any secret is uploaded. A test asserts this ordering.
+- **Order steps by trust.** Third-party code (the tool installer, and the bundled packages during the self-test) runs *before* any secret is uploaded. A test asserts this ordering.
+- **Ship artifacts, don't install in the sandbox.** Bundling on the host means the sandbox never runs a package manager: nothing to pin, no install scripts, and no registry access needed at build time.
 
 **Hardening.** `install-tools.sh` works on images with or without root and apt, verifying checksums of anything it downloads. Detecting the privilege-drop tool (`setpriv`, `runuser`, or `su`) and creating the runner user with `useradd` or `adduser` serve the same purpose. If you control your base image, bake the tools in and delete most of this.
 
@@ -65,7 +66,7 @@ Reusing sandboxes would save the restore (about 15 seconds here), at the cost of
 
 ## 4. Grant the least network access
 
-**Essential.** Investigation sandboxes use an `allow-list` policy with exactly one host: the model provider's API, read from the model's base URL in Pi's registry ([`investigateTask`](../src/tasks.ts)). The builder uses `allow-all` because it needs git hosts and npm. It never runs the agent, and the only third-party code it runs (pinned npm packages and the runner's self-test) runs before any secret arrives.
+**Essential.** Investigation sandboxes use an `allow-list` policy with exactly one host: the model provider's API, read from the model's base URL in Pi's registry ([`investigateTask`](../src/tasks.ts)). The builder uses `allow-all` because it needs git hosts, and nodejs.org or GitHub releases when the base image lacks Node or ripgrep. It never runs the agent, and the only third-party code it runs (the tool installer and the runner's self-test) runs before any secret arrives.
 
 Two details in `openRenderSandbox`:
 

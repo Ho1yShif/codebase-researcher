@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ensures git, ripgrep, coreutils timeout, and Node >= 22 with npm. Uses apt-get when root; otherwise
+# Ensures git, ripgrep, coreutils timeout, and Node >= 22. Uses apt-get when root; otherwise
 # downloads checksum-verified official builds (Node into <app_dir>/node, rg into <app_dir>/bin).
 # Usage: install-tools.sh <app_dir>
 set -euo pipefail
@@ -9,7 +9,7 @@ node_version=${TRIAGE_NODE_VERSION:-v24.14.1}
 rg_version=${TRIAGE_RG_VERSION:-14.1.1}
 log() { printf 'install-tools: %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
-node_ok() { have node && have npm && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; }
+node_ok() { have node && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; }
 fetch() {
   if have curl; then
     curl -fsSL --retry 3 -o "$2" "$1"
@@ -75,6 +75,6 @@ fi
 
 export PATH="$app/bin:$app/node/bin:$PATH"
 missing=""
-for tool in git rg timeout node npm tar; do have "$tool" || missing="$missing $tool"; done
+for tool in git rg timeout node tar; do have "$tool" || missing="$missing $tool"; done
 if [ -n "$missing" ]; then log "missing tools:$missing (git and coreutils can only be installed as root via apt-get)"; exit 1; fi
 log "git $(git --version | cut -d' ' -f3), rg $(rg --version | head -n 1 | cut -d' ' -f2), node $(node --version)"

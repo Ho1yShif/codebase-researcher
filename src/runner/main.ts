@@ -1,5 +1,4 @@
 import { mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
-import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { RUNNER_EXIT, RunnerInput, ALL_PROVIDER_KEY_ENV, errorMessage, providerApiKey } from "../types.ts";
@@ -9,6 +8,7 @@ import type { FauxScript } from "./faux.ts";
 import { runSession, PROMPT_VERSION } from "./session.ts";
 import { type Api, InMemoryCredentialStore, type Model as PiModel, type MutableModels, type Usage as PiUsage } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import agentCorePackage from "@earendil-works/pi-agent-core/package.json" with { type: "json" };
 
 export type Credentials = {
   fileKey?: string;
@@ -47,8 +47,8 @@ export const secretsIn = (creds: Credentials): string[] =>
 export type Model = PiModel<Api>;
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 
-/** Reported in `started` and `--self-test`; resolved at runtime because the package is external to the bundle. */
-export const PI_VERSION: string = createRequire(import.meta.url)("@earendil-works/pi-agent-core/package.json").version;
+/** Reported in `started` and `--self-test`. */
+export const PI_VERSION: string = agentCorePackage.version;
 
 export const DEFAULT_MODEL = "claude-sonnet-4-5";
 export const SUPPORTED_PROVIDERS = ["anthropic", "openai", "google"] as const;

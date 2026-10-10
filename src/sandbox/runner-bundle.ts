@@ -1,16 +1,10 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { isDeepStrictEqual } from "node:util";
 import { build, type Plugin } from "esbuild";
 import { REPO_ROOT } from "./interface.ts";
 
-/** Installed in the sandbox with `npm ci` from sandbox-runtime/deps; everything else is bundled. */
-export const RUNNER_EXTERNALS = ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "typebox"] as const;
-const DEPS_DIR = join(REPO_ROOT, "sandbox-runtime/deps");
 const INSTANCE_PROMPT_MAX_BYTES = 20 * 1024;
-
-export type RunnerBundle = { "runner.mjs": string; "package.json": string; "package-lock.json": string };
 
 const require = createRequire(import.meta.url);
 
@@ -26,31 +20,15 @@ const rawText: Plugin = {
   },
 };
 
-/** Bundles src/runner/main.ts into one ESM file plus the package.json and lockfile for its externals. */
-export async function bundleRunner(): Promise<RunnerBundle> {
+/**
+ * Bundles src/runner/main.ts and every package it uses into one self-contained ESM file, so the sandbox
+ * needs only Node to run it: no npm, no node_modules.
+ */
+export async function bundleRunner(): Promise<string> {
   const { size } = await stat(join(REPO_ROOT, "prompt.md"));
   if (size > INSTANCE_PROMPT_MAX_BYTES) {
     throw new Error(`prompt.md is ${size} bytes (limit ${INSTANCE_PROMPT_MAX_BYTES}). Trim it or raise INSTANCE_PROMPT_MAX_BYTES in src/sandbox/runner-bundle.ts.`);
   }
-
-  const pkg = JSON.parse(await readFile(join(REPO_ROOT, "package.json"), "utf8"));
-  const dependencies = Object.fromEntries(RUNNER_EXTERNALS.map((name) => [name, pkg.dependencies[name]]));
-  for (const [name, version] of Object.entries(dependencies)) {
-    if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`${name} must be pinned to an exact version, got ${version}`);
-  }
-  const [depsPkg, lock] = await Promise.all(
-    ["package.json", "package-lock.json"].map((name) => readFile(join(DEPS_DIR, name), "utf8")),
-  ) as [string, string];
-  if (
-    !isDeepStrictEqual(JSON.parse(depsPkg), { type: "module", private: true, dependencies }) ||
-    !isDeepStrictEqual(JSON.parse(lock).packages?.[""]?.dependencies, dependencies)
-  ) {
-    throw new Error(
-      `sandbox-runtime/deps does not pin ${JSON.stringify(dependencies)}; update sandbox-runtime/deps/package.json, then run ` +
-        "`npm install --package-lock-only --ignore-scripts` in sandbox-runtime/deps",
-    );
-  }
-
   const result = await build({
     absWorkingDir: join(REPO_ROOT, "src/runner"),
     entryPoints: ["main.ts"],
@@ -60,20 +38,18 @@ export async function bundleRunner(): Promise<RunnerBundle> {
     platform: "node",
     format: "esm",
     target: "node22",
-    external: RUNNER_EXTERNALS.flatMap((name) => [name, `${name}/*`]),
+    // Bundled CommonJS dependencies call require() for Node built-ins, which ESM doesn't define.
+    banner: { js: 'import { createRequire as __createRequire } from "node:module"; const require = __createRequire(import.meta.url);' },
     plugins: [rawText],
     logLevel: "warning",
   });
-  return { "runner.mjs": result.outputFiles[0]!.text, "package.json": depsPkg, "package-lock.json": lock };
+  return result.outputFiles[0]!.text;
 }
 
-/**
- * Writes the bundle to `dir` and returns the path of runner.mjs. `dir` must sit inside the repo so the
- * externals resolve from its node_modules.
- */
+/** Writes the bundle to `dir/runner.mjs` and returns that path. */
 export async function writeRunnerBundle(dir: string): Promise<string> {
-  const bundle = await bundleRunner();
+  const path = join(dir, "runner.mjs");
   await mkdir(dir, { recursive: true });
-  for (const [name, contents] of Object.entries(bundle)) await writeFile(join(dir, name), contents);
-  return join(dir, "runner.mjs");
+  await writeFile(path, await bundleRunner());
+  return path;
 }

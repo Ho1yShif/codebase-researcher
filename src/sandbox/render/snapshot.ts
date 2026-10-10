@@ -80,7 +80,7 @@ export function parseLsRemote(out: string, branch?: string): { branch: string; c
 //   1. Upload sandbox-runtime/ and the runner bundle to a staging dir
 //   2. Install tools (git, node, ripgrep) via install-tools.sh
 //   3. Detect node path and privilege-drop tool, create runner user, write env
-//   4. Install runner npm deps, set permissions, self-test
+//   4. Set permissions, run the runner's self-test
 //   5. Upload per-host credentials, clone each repo, scrub credentials (build/ scripts)
 //   6. Upload the manifest
 //   7. Lockdown (chown root, chmod read-only, execute-only node), delete the staging dir
@@ -133,13 +133,10 @@ export async function buildSnapshot(
     await client.upload(id, `${SANDBOX_APP}/env`, envFileContent(env.nodePath, env.dropTool));
     await client.upload(id, `${SANDBOX_APP}/gitconfig`, SANDBOX_GITCONFIG);
 
-    // ── Runner: install deps, set permissions, self-test ────────────
-    // npm and the self-test execute third-party code; credentials are
+    // ── Runner: set permissions, self-test ──────────────────────────
+    // The self-test executes third-party code (the bundled packages); credentials are
     // uploaded only after this step succeeds.
-    const nodeDir = env.nodePath.substring(0, env.nodePath.lastIndexOf("/"));
     await client.check(id, [
-      `cd ${SANDBOX_APP}/runner`,
-      `PATH=${nodeDir}:${SANDBOX_APP}/bin:$PATH npm ci --omit=dev --ignore-scripts --no-audit --no-fund --cache ${STAGE}/npm-cache`,
       `chmod 755 ${SANDBOX_ROOT}`,
       `chmod -R a+rX,go-w ${SANDBOX_APP}`,
       `timeout 120 ${SANDBOX_APP}/as-runner.sh ${shq(env.nodePath)} ${SANDBOX_APP}/runner/runner.mjs --self-test`,
@@ -255,14 +252,14 @@ async function createSnapshot(client: SandboxClient, sandboxId: string, name: st
   return snap;
 }
 
-/** A tar of the runtime scripts and a freshly built runner bundle; its externals are installed in the sandbox. */
+/** A tar of the scripts and a freshly built, self-contained runner bundle. */
 async function stageArchive({ sandboxDir }: RenderConfig): Promise<Buffer> {
   const bundle = await bundleRunner();
   const dir = await mkdtemp(join(tmpdir(), "triage-stage-"));
   try {
     await mkdir(join(dir, "runner"));
     await mkdir(join(dir, "build"));
-    for (const [name, contents] of Object.entries(bundle)) await writeFile(join(dir, "runner", name), contents);
+    await writeFile(join(dir, "runner/runner.mjs"), bundle);
     for (const name of [...RUNTIME_SCRIPTS, ...BUILD_SCRIPTS]) await cp(join(sandboxDir, name), join(dir, name));
     const chunks: Buffer[] = [];
     for await (const chunk of createTar({ cwd: dir, portable: true }, await readdir(dir))) chunks.push(chunk);

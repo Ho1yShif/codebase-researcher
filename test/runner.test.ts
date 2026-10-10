@@ -1,5 +1,6 @@
 import { existsSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import { isBuiltin } from "node:module";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildRunner, makeFixture, makeInput, parseEvents, REPO, RUNNER_DIR, runCli, terminal, toolResults, CLARIFY, call, calls, runScripted, say, finalAnswer } from "./helpers.ts";
@@ -109,13 +110,12 @@ describe("bundled runner (runner.mjs)", { timeout: 30_000 }, () => {
     expect(code).toBe(0);
   });
 
-  it("writes package.json with the externals pinned exactly", () => {
-    const pkg = JSON.parse(readFileSync(join(runnerDir, "package.json"), "utf8"));
-    expect(pkg).toEqual({
-      type: "module",
-      private: true,
-      dependencies: { "@earendil-works/pi-agent-core": "0.83.0", "@earendil-works/pi-ai": "0.83.0", typebox: "1.3.7" },
-    });
+  it("is one self-contained file that imports only Node built-ins", () => {
+    expect(readdirSync(runnerDir)).toEqual(["runner.mjs"]);
+    const code = readFileSync(join(runnerDir, "runner.mjs"), "utf8");
+    const imports = [...code.matchAll(/^import\b[^;]*?\bfrom\s+"([^"]+)"/gm)].map((m) => m[1]);
+    expect(imports.length).toBeGreaterThan(0);
+    expect(imports.filter((spec) => !isBuiltin(spec!))).toEqual([]);
   });
 });
 
@@ -462,7 +462,8 @@ describe("submit_investigation in a run", { timeout: 30_000 }, () => {
   });
 });
 
-const ALLOWED_EXTERNAL = new Set([
+/** The only packages the runner may use; everything it imports ends up in the sandbox bundle. */
+const RUNNER_PACKAGES = new Set([
   "@earendil-works/pi-agent-core",
   "@earendil-works/pi-ai",
   "typebox",
@@ -477,7 +478,7 @@ function extractImports(code: string): string[] {
 }
 
 describe("runner import boundary", () => {
-  it("files under src/runner/ import only from src/runner/*, src/types.ts, Node built-ins, or pinned externals", () => {
+  it("files under src/runner/ import only from src/runner/*, src/types.ts, Node built-ins, or the runner packages", () => {
     const files = readdirSync(RUNNER_DIR).filter(f => f.endsWith(".ts") && !f.endsWith(".d.ts"));
     const violations: string[] = [];
 
@@ -496,10 +497,9 @@ describe("runner import boundary", () => {
           violations.push(`${file}: imports "${spec}" (outside runner/ and not src/types.ts)`);
           continue;
         }
-        // Allow pinned externals
         const pkg = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!;
-        if (ALLOWED_EXTERNAL.has(pkg)) continue;
-        violations.push(`${file}: imports "${spec}" (not a pinned external or Node built-in)`);
+        if (RUNNER_PACKAGES.has(pkg)) continue;
+        violations.push(`${file}: imports "${spec}" (not a runner package or Node built-in)`);
       }
     }
 

@@ -326,7 +326,7 @@ src/
   sandbox/
     index.ts              # configureSandboxes: picks Render or local sandboxes from the environment
     interface.ts          # the Sandbox contract both providers implement, runner output parser, git helper
-    runner-bundle.ts      # bundles src/runner with esbuild for upload to the builder (and for local runs)
+    runner-bundle.ts      # bundles src/runner and its packages into one self-contained file for the builder (and local runs)
     local.ts              # local sandboxes over your own checkouts (no isolation; for development and tests)
     render/
       config.ts           # Render env config and workspace resolution
@@ -342,10 +342,9 @@ src/
     faux.ts               # deterministic --faux mode for testing without a model
 sandbox-runtime/          # copied into the builder sandbox and baked into the snapshot
   verify.sh               # verifies layout, permissions, egress policy, runner dumpability
-  install-tools.sh        # ensures git, ripgrep, Node >= 22, npm in the builder
+  install-tools.sh        # ensures git, ripgrep, and Node >= 22 in the builder
   run-investigation.sh    # launches the runner as the unprivileged user under coreutils timeout
   as-runner.sh            # privilege drop wrapper (setpriv/runuser/su)
-  deps/                   # package.json + lockfile for the runner's unbundled dependencies
   build/                  # builder-only, deleted before the snapshot
     git-credential-staged.sh  # git credential helper that reads the staged per-host token files
     scrub-credentials.sh      # fails the build if a token leaked, then deletes the staged credentials
