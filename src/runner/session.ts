@@ -1,13 +1,14 @@
 import { type InvestigationResult, RUNNER_EXIT, type RunnerEvent, type RunnerInput } from "../types.ts";
-import type { AgentSession, AgentSessionEvent, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { Agent, type AfterToolCallContext, type AgentEvent } from "@earendil-works/pi-agent-core";
+import { isRetryableAssistantError, type AssistantMessage, type Models } from "@earendil-works/pi-ai";
 import { type Emitter, outputPreview, toUsage } from "./main.ts";
-import { hermeticResourceLoader, type Model, type Pi, THINKING_BUDGETS } from "./main.ts";
-import { createSafeBashTool } from "./tools.ts";
-import { createSearchTools } from "./tools.ts";
+import { type Model, PI_VERSION, THINKING_BUDGETS } from "./main.ts";
+import { createInspectionTools } from "./tools.ts";
 import { createSubmitTool, MAX_SUBMIT_ATTEMPTS, SUBMIT_TOOL } from "./submit.ts";
 import CORE_PROMPT from "./core-prompt.md?raw";
 import INSTANCE_PROMPT from "../../prompt.md?raw";
 import { createHash } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 
 export const SYSTEM_PROMPT = INSTANCE_PROMPT + "\n\n" + CORE_PROMPT;
 export const PROMPT_VERSION = createHash("sha256").update(SYSTEM_PROMPT).digest("hex").slice(0, 12);
@@ -45,14 +46,17 @@ export const MAX_TURNS = 120;
 export const SAFETY_MARGIN_MS = 10_000;
 /** How long an abort may take to settle before the runner reports the timeout anyway. */
 const ABORT_GRACE_MS = 5_000;
-const TOOLS = ["read", "grep", "find", "ls", "bash", SUBMIT_TOOL];
+/** Retries of a model request that failed transiently (overloaded, rate limited, dropped stream). */
+const MAX_MODEL_RETRIES = 2;
+const RETRY_BASE_DELAY_MS = 2_000;
 
 type Failure = { code: Extract<RunnerEvent, { type: "error" }>["code"]; message: string };
 
 export interface SessionOptions {
-  pi: Pi;
   input: RunnerInput;
-  modelRuntime: ModelRuntime;
+  models: Models;
+  /** Passed with every request; undefined only for the faux provider. */
+  apiKey: string | undefined;
   model: Model;
   emit: Emitter;
   /** Epoch ms the `timeout_ms` budget is measured from (process start). */
@@ -60,50 +64,56 @@ export interface SessionOptions {
 }
 
 /** Runs one investigation and emits `started` … then exactly one `result` or `error`. Returns the exit code. */
-export async function runSession({ pi, input, modelRuntime, model, emit, startedAt }: SessionOptions): Promise<number> {
+export async function runSession({ input, models, apiKey, model, emit, startedAt }: SessionOptions): Promise<number> {
   let submission: InvestigationResult | undefined;
   let failure: Failure | undefined;
   const checkouts = { manifest: input.manifest, repos_root: input.repos_root };
+  const stopped = new AbortController();
 
-  const { session } = await pi.createAgentSession({
-    cwd: input.repos_root,
-    modelRuntime,
-    model,
-    thinkingLevel: input.thinking_level,
-    resourceLoader: hermeticResourceLoader(pi, SYSTEM_PROMPT),
-    sessionManager: pi.SessionManager.inMemory(input.repos_root),
-    settingsManager: pi.SettingsManager.inMemory({
-      compaction: { enabled: false },
-      retry: { enabled: true, maxRetries: 2 },
-      images: { blockImages: true },
-      thinkingBudgets: THINKING_BUDGETS,
-      enableInstallTelemetry: false,
-      enableAnalytics: false,
-    }),
-    tools: TOOLS,
-    customTools: [
-      createSafeBashTool(pi, { reposRoot: input.repos_root, scratchDir: input.scratch_dir }),
-      ...createSearchTools(pi, input.repos_root),
-      createSubmitTool(pi, checkouts, {
-        onAccepted: (result) => (submission = result),
-        onRejected: (attempts) => {
-          if (attempts >= MAX_SUBMIT_ATTEMPTS) {
-            failure ??= { code: "invalid_submission", message: `${SUBMIT_TOOL} was rejected ${attempts} times` };
-          }
-        },
-      }),
-    ],
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: SYSTEM_PROMPT,
+      model,
+      thinkingLevel: input.thinking_level,
+      tools: [
+        ...createInspectionTools({ reposRoot: input.repos_root, scratchDir: input.scratch_dir }),
+        createSubmitTool(checkouts, {
+          onAccepted: (result) => (submission = result),
+          onRejected: (attempts) => {
+            if (attempts >= MAX_SUBMIT_ATTEMPTS) {
+              failure ??= { code: "invalid_submission", message: `${SUBMIT_TOOL} was rejected ${attempts} times` };
+            }
+          },
+        }),
+      ],
+    },
+    streamFn: (m, context, options) => models.streamSimple(m, context, options),
+    getApiKey: () => apiKey,
+    thinkingBudgets: THINKING_BUDGETS,
+    afterToolCall: async (ctx) => (endsBatch(ctx) || failure !== undefined ? { terminate: true } : undefined),
   });
-  installBatchTermination(session, () => failure !== undefined);
 
-  emit({ type: "started", pi_version: pi.VERSION, model: model.id, prompt_version: PROMPT_VERSION });
+  emit({ type: "started", pi_version: PI_VERSION, model: model.id, prompt_version: PROMPT_VERSION });
 
   const stop = (reason?: Failure) => {
     if (reason) failure ??= reason;
-    if (session.isStreaming) void session.abort();
+    stopped.abort();
+    if (agent.state.isStreaming) agent.abort();
+  };
+  /** Sends `text`, then restarts the last turn while it fails with a transient model error. */
+  const prompt = async (text: string) => {
+    await agent.prompt(text);
+    for (let attempt = 1; attempt <= MAX_MODEL_RETRIES && !stopped.signal.aborted; attempt++) {
+      const last = lastAssistant(agent);
+      if (last?.stopReason !== "error" || !isRetryableAssistantError(last)) return;
+      agent.state.messages = agent.state.messages.slice(0, -1);
+      await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), undefined, { signal: stopped.signal }).catch(() => {});
+      if (stopped.signal.aborted) return;
+      await agent.continue();
+    }
   };
   let turns = 0;
-  const unsubscribe = session.subscribe((event) => {
+  const unsubscribe = agent.subscribe((event) => {
     forward(event, emit);
     if (event.type !== "turn_end") return;
     turns++;
@@ -123,10 +133,8 @@ export async function runSession({ pi, input, modelRuntime, model, emit, started
   });
 
   const conversation = (async () => {
-    await session.prompt(renderUserPrompt(input), { expandPromptTemplates: false });
-    if (!submission && !failure && stoppedOnItsOwn(session)) {
-      await session.prompt(SUBMIT_REMINDER, { expandPromptTemplates: false });
-    }
+    await prompt(renderUserPrompt(input));
+    if (!submission && !failure && stoppedOnItsOwn(agent)) await prompt(SUBMIT_REMINDER);
   })();
   let thrown: unknown;
   await Promise.race([conversation.catch((err) => (thrown = err)), timedOut]);
@@ -137,15 +145,14 @@ export async function runSession({ pi, input, modelRuntime, model, emit, started
   if (submission) {
     emit({ type: "result", result: submission });
   } else {
-    failure ??= diagnose(session, thrown);
+    failure ??= diagnose(agent, thrown);
     emit({ type: "error", ...failure });
   }
-  session.dispose();
   if (submission) return RUNNER_EXIT.ok;
   return failure?.code === "timeout" ? RUNNER_EXIT.timeout : RUNNER_EXIT.error;
 }
 
-function forward(event: AgentSessionEvent, emit: Emitter) {
+function forward(event: AgentEvent, emit: Emitter) {
   switch (event.type) {
     case "tool_execution_start":
       emit({ type: "tool_call", tool_call_id: event.toolCallId, tool: event.toolName, args: event.args });
@@ -172,37 +179,30 @@ function forward(event: AgentSessionEvent, emit: Emitter) {
 }
 
 /**
- * Pi ends the loop only when every tool result in a batch sets `terminate`, so a submission batched with
- * other calls (e.g. `ls` + submit) would cost another LLM request. Mark the submission's siblings too (a
- * rejected submission carries no `terminate`, so the model still gets to retry), and every result once a
- * stop has been requested.
+ * The loop ends only when every tool result in a batch sets `terminate`, so a submission batched with other
+ * calls (e.g. `ls` + submit) would cost another LLM request. The submit tool terminates on acceptance;
+ * this marks its siblings too. A rejected submission carries no `terminate`, so the model still gets to retry.
  */
-function installBatchTermination(session: AgentSession, stopRequested: () => boolean) {
-  const agent = session.agent;
-  const previous = agent.afterToolCall;
-  agent.afterToolCall = async (ctx, signal) => {
-    const result = await previous?.(ctx, signal);
-    const siblingOfSubmit =
-      ctx.toolCall.name !== SUBMIT_TOOL && ctx.assistantMessage.content.some((c) => c.type === "toolCall" && c.name === SUBMIT_TOOL);
-    return siblingOfSubmit || stopRequested() ? { ...result, terminate: true } : result;
-  };
+function endsBatch({ toolCall, assistantMessage }: AfterToolCallContext): boolean {
+  return toolCall.name !== SUBMIT_TOOL && assistantMessage.content.some((c) => c.type === "toolCall" && c.name === SUBMIT_TOOL);
 }
 
-function lastAssistant(session: AgentSession) {
-  return session.state.messages.findLast((m) => m.role === "assistant");
+function lastAssistant(agent: Agent): AssistantMessage | undefined {
+  const last = agent.state.messages.findLast((m) => m.role === "assistant");
+  return last?.role === "assistant" ? last : undefined;
 }
 
 /** The model ended its turn without being stopped or failing (so a reminder may help). */
-function stoppedOnItsOwn(session: AgentSession): boolean {
-  const last = lastAssistant(session);
-  return last?.role === "assistant" && (last.stopReason === "stop" || last.stopReason === "length");
+function stoppedOnItsOwn(agent: Agent): boolean {
+  const last = lastAssistant(agent);
+  return last?.stopReason === "stop" || last?.stopReason === "length";
 }
 
-function diagnose(session: AgentSession, thrown: unknown): Failure {
+function diagnose(agent: Agent, thrown: unknown): Failure {
   if (thrown !== undefined) return { code: "agent_error", message: thrown instanceof Error ? thrown.message : String(thrown) };
-  const last = lastAssistant(session);
-  if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
-    return { code: "agent_error", message: last.errorMessage ?? session.state.errorMessage ?? `model request ${last.stopReason}` };
+  const last = lastAssistant(agent);
+  if (last?.stopReason === "error" || last?.stopReason === "aborted") {
+    return { code: "agent_error", message: last.errorMessage ?? agent.state.errorMessage ?? `model request ${last.stopReason}` };
   }
   return { code: "no_submission", message: `the model stopped without calling ${SUBMIT_TOOL}, even after a reminder` };
 }

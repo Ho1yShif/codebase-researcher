@@ -19,8 +19,8 @@
     "start:workflow": "tsx src/workflow.ts"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.83.0",
     "@earendil-works/pi-ai": "0.83.0",
-    "@earendil-works/pi-coding-agent": "0.83.0",
     "@hono/node-server": "^2.1.0",
     "@renderinc/sdk": "1.2.0",
     "@slack/types": "^3.1.0",

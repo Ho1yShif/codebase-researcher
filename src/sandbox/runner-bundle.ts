@@ -6,7 +6,7 @@ import { build, type Plugin } from "esbuild";
 import { REPO_ROOT } from "./interface.ts";
 
 /** Installed in the sandbox with `npm ci` from sandbox-runtime/deps; everything else is bundled. */
-export const RUNNER_EXTERNALS = ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai", "typebox"] as const;
+export const RUNNER_EXTERNALS = ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "typebox"] as const;
 const DEPS_DIR = join(REPO_ROOT, "sandbox-runtime/deps");
 const INSTANCE_PROMPT_MAX_BYTES = 20 * 1024;
 

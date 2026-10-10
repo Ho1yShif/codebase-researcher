@@ -1,7 +1,17 @@
-import { basename } from "node:path";
-import type { Pi } from "./main.ts";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { errorMessage } from "../types.ts";
+import { readdir } from "node:fs/promises";
+import { basename, resolve } from "node:path";
+import {
+  type AgentTool,
+  type BashToolDetails,
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
+  type ExecutionToolContext,
+  type ReadToolDetails,
+  createBashTool,
+  createReadTool,
+} from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
+import { Type } from "typebox";
 
 
 /*
@@ -238,14 +248,13 @@ export function splitCommands(line: string): string[][] {
   return commands;
 }
 
-
-// ── safe-shell ──────────────────────────────────────────────────────────
-
-
-
+// ── tools ───────────────────────────────────────────────────────────────
 
 const DEFAULT_TIMEOUT_S = 60;
 const MAX_TIMEOUT_S = 300;
+const LS_DEFAULT_LIMIT = 500;
+const LS_MAX_LIMIT = 2000;
+const OUTPUT_LIMIT = `${DEFAULT_MAX_LINES} lines / ${DEFAULT_MAX_BYTES / 1024}KB`;
 
 export interface ShellOptions {
   reposRoot: string;
@@ -256,7 +265,7 @@ export interface ShellOptions {
  * Builds the child env from an allowlist so nothing from the runner's environment (model credentials,
  * pool metadata) can reach a model-controlled process.
  */
-export function shellEnv(path: string | undefined, scratchDir: string): NodeJS.ProcessEnv {
+export function shellEnv(path: string | undefined, scratchDir: string): Record<string, string> {
   return {
     PATH: path || "/usr/local/bin:/usr/bin:/bin",
     LANG: process.env.LANG || "C.UTF-8",
@@ -271,25 +280,74 @@ export function shellEnv(path: string | undefined, scratchDir: string): NodeJS.P
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: "safe.directory",
     GIT_CONFIG_VALUE_0: "*",
-    PI_OFFLINE: "1",
   };
 }
 
-/** Replaces Pi's built-in bash: allowlisted env, read-only command policy, bounded timeouts. */
-export function createSafeBashTool(pi: Pi, { reposRoot, scratchDir }: ShellOptions) {
-  const inner = pi.createBashToolDefinition(reposRoot, {
-    exposeSessionEnvironment: false,
-    spawnHook: ({ command, env }) => ({ command, cwd: reposRoot, env: shellEnv(env.PATH, scratchDir) }),
+/** The read-only tools the agent gets, all rooted at the checkouts. */
+export function createInspectionTools(opts: ShellOptions): AgentTool<any>[] {
+  const context: ExecutionToolContext = {
+    env: new NodeExecutionEnv({ cwd: opts.reposRoot, shellEnv: shellEnv(process.env.PATH, opts.scratchDir) }),
+  };
+  return [createTextReadTool(context, opts), createLsTool(opts), createSafeBashTool(context, opts)];
+}
+
+/** Pi's read tool without image attachments: the agent investigates source, and images only cost tokens. */
+function createTextReadTool(context: ExecutionToolContext, { reposRoot }: ShellOptions) {
+  const inner = createReadTool();
+  const tool: AgentTool<typeof inner.parameters, ReadToolDetails | undefined> = {
+    ...inner,
+    description:
+      `Read a text file. path is relative to ${reposRoot} or absolute. offset is the first line to read (1-based) and ` +
+      `limit the number of lines. Output is truncated to ${OUTPUT_LIMIT}; continue with offset for the rest.`,
+    async execute(toolCallId, params, signal) {
+      const result = await inner.execute(toolCallId, params, signal, undefined, context);
+      const content = result.content.map((c) => (c.type === "image" ? { type: "text" as const, text: "[image omitted]" } : c));
+      return { ...result, content };
+    },
+  };
+  return tool;
+}
+
+const LsParams = Type.Object({
+  path: Type.Optional(Type.String({ description: "Directory to list, relative to the repositories root or absolute (default: the root)" })),
+  limit: Type.Optional(Type.Integer({ description: `Maximum entries to return (default ${LS_DEFAULT_LIMIT})` })),
+});
+
+function createLsTool({ reposRoot }: ShellOptions): AgentTool<typeof LsParams> {
+  return {
+    name: "ls",
+    label: "ls",
+    description: `List a directory's entries in sorted order, with a trailing / on directories. Paths are relative to ${reposRoot}.`,
+    parameters: LsParams,
+    async execute(_toolCallId, { path, limit }) {
+      const entries = await readdir(resolve(reposRoot, path ?? "."), { withFileTypes: true });
+      const names = entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name)).sort((a, b) => a.localeCompare(b));
+      const max = Math.min(Math.max(limit ?? LS_DEFAULT_LIMIT, 1), LS_MAX_LIMIT);
+      let text = names.slice(0, max).join("\n") || "(empty directory)";
+      if (names.length > max) text += `\n\n[${names.length - max} more entries; raise limit or use bash]`;
+      return { content: [{ type: "text", text }], details: undefined };
+    },
+  };
+}
+
+/** Pi's bash tool with an allowlisted env, the read-only command policy, and bounded timeouts. */
+function createSafeBashTool(context: ExecutionToolContext, { reposRoot, scratchDir }: ShellOptions) {
+  const inner = createBashTool({
+    prepare: (execution) => {
+      execution.cwd = reposRoot;
+      execution.env = shellEnv(process.env.PATH, scratchDir);
+      execution.inheritEnv = false;
+    },
   });
-  return pi.defineTool({
+  const tool: AgentTool<typeof inner.parameters, BashToolDetails | undefined> = {
     ...inner,
     description:
       `Run a bash command for read-only inspection. Working directory: ${reposRoot} (repositories at <owner>/<name>). ` +
       `Writable scratch directory: ${scratchDir} ($HOME and $TMPDIR point there). ` +
-      "Use it for git history (git -C <owner>/<name> log/show/blame/diff/grep/ls-files), rg, find, sed -n, wc, and " +
-      "small scripts or tests that do not modify the checkouts. Mutating git commands, network tools, package installs " +
-      `and sudo are rejected. Output keeps the last 2000 lines / 50KB. timeout is in seconds: default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}.`,
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      "Use it to search (rg, git -C <owner>/<name> grep, find), for git history (git -C <owner>/<name> log/show/blame/diff/ls-files), " +
+      "sed -n, wc, and small scripts or tests that do not modify the checkouts. Mutating git commands, network tools, package installs " +
+      `and sudo are rejected. Output keeps the last ${OUTPUT_LIMIT}. timeout is in seconds: default ${DEFAULT_TIMEOUT_S}, max ${MAX_TIMEOUT_S}.`,
+    async execute(toolCallId, params, signal, onUpdate) {
       const reason = rejectReason(params.command, { scratchDir });
       if (reason) {
         throw new Error(
@@ -298,43 +356,9 @@ export function createSafeBashTool(pi: Pi, { reposRoot, scratchDir }: ShellOptio
         );
       }
       const timeout = Math.min(Math.max(params.timeout ?? DEFAULT_TIMEOUT_S, 1), MAX_TIMEOUT_S);
-      return inner.execute(toolCallId, { ...params, timeout }, signal, onUpdate, ctx);
+      return inner.execute(toolCallId, { ...params, timeout }, signal, onUpdate, context);
     },
-  });
-}
-
-
-// ── search ──────────────────────────────────────────────────────────────
-
-
-
-const FALLBACK: Record<"grep" | "find", string> = {
-  grep: "Use the bash tool instead, e.g. `git -C <owner>/<name> grep -n <pattern>`.",
-  find: "Use the bash tool instead, e.g. `git -C <owner>/<name> ls-files '<glob>'` or `find <owner>/<name> -name '<glob>'`.",
-};
-
-/**
- * Pi's grep and find need rg and fd on PATH; with PI_OFFLINE=1 they fail rather than download them.
- * Keep the built-ins but point the model at a bash fallback when the binary is missing.
- */
-export function createSearchTools(pi: Pi, cwd: string): ToolDefinition<any, any>[] {
-  return [
-    withFallbackHint(pi, pi.createGrepToolDefinition(cwd), FALLBACK.grep),
-    withFallbackHint(pi, pi.createFindToolDefinition(cwd), FALLBACK.find),
-  ];
-}
-
-function withFallbackHint(pi: Pi, tool: ToolDefinition<any, any>, hint: string) {
-  return pi.defineTool({
-    ...tool,
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      try {
-        return await tool.execute(toolCallId, params, signal, onUpdate, ctx);
-      } catch (err) {
-        const message = errorMessage(err);
-        throw new Error(/not available and could not be downloaded/.test(message) ? `${message}. ${hint}` : message);
-      }
-    },
-  });
+  };
+  return tool;
 }
 

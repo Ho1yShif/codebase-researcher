@@ -1,9 +1,9 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { type Evidence, InvestigationResult, type RunnerInput } from "../types.ts";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import type { Pi } from "./main.ts";
 
 export const SUBMIT_TOOL = "submit_investigation";
 export const MAX_SUBMIT_ATTEMPTS = 3;
@@ -116,10 +116,10 @@ export interface SubmitHandlers {
   onRejected(attempts: number): void;
 }
 
-export function createSubmitTool(pi: Pi, checkouts: Checkouts, handlers: SubmitHandlers) {
+export function createSubmitTool(checkouts: Checkouts, handlers: SubmitHandlers): AgentTool<typeof SubmitParams, InvestigationResult> {
   let accepted: InvestigationResult | undefined;
   let rejected = 0;
-  return pi.defineTool({
+  return {
     name: SUBMIT_TOOL,
     label: "Submit investigation",
     description:
@@ -148,5 +148,5 @@ export function createSubmitTool(pi: Pi, checkouts: Checkouts, handlers: SubmitH
       handlers.onAccepted(verdict.result);
       return { content: [{ type: "text", text: "Submission recorded. The investigation is complete." }], details: verdict.result, terminate: true };
     },
-  });
+  };
 }

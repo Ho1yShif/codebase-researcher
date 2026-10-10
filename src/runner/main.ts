@@ -1,6 +1,5 @@
 import { mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { RUNNER_EXIT, RunnerInput, ALL_PROVIDER_KEY_ENV, errorMessage, providerApiKey } from "../types.ts";
@@ -8,9 +7,8 @@ import type { RunnerEvent, Usage } from "../types.ts";
 import { defaultFauxScript, registerFauxModel } from "./faux.ts";
 import type { FauxScript } from "./faux.ts";
 import { runSession, PROMPT_VERSION } from "./session.ts";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import type { Usage as PiUsage } from "@earendil-works/pi-ai";
-import type * as PiSdk from "@earendil-works/pi-coding-agent";
+import { type Api, InMemoryCredentialStore, type Model as PiModel, type MutableModels, type Usage as PiUsage } from "@earendil-works/pi-ai";
+import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 
 export type Credentials = {
   fileKey?: string;
@@ -46,38 +44,29 @@ export const apiKeyFor = (creds: Credentials, provider: string): string | undefi
 export const secretsIn = (creds: Credentials): string[] =>
   [creds.fileKey, ...Object.values(creds.envKeys)].filter((s): s is string => !!s);
 
-export type Pi = typeof PiSdk;
-export type Model = NonNullable<PiSdk.CreateAgentSessionOptions["model"]>;
+export type Model = PiModel<Api>;
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
+
+/** Reported in `started` and `--self-test`; resolved at runtime because the package is external to the bundle. */
+export const PI_VERSION: string = createRequire(import.meta.url)("@earendil-works/pi-agent-core/package.json").version;
 
 export const DEFAULT_MODEL = "claude-sonnet-4-5";
 export const SUPPORTED_PROVIDERS = ["anthropic", "openai", "google"] as const;
 export type SupportedProvider = (typeof SUPPORTED_PROVIDERS)[number];
 
 const MAX_OUTPUT_TOKENS = 16_384;
-/** Pinned in settings so the max_tokens cap below stays in step with Pi's thinking budget. */
+/** Passed to the agent so the max_tokens cap below stays in step with Pi's thinking budget. */
 export const THINKING_BUDGETS = { minimal: 1024, low: 2048, medium: 8192, high: 16_384 } as const;
 
-/**
- * Pi reads PI_CODING_AGENT_DIR when its modules are first evaluated (the rg/fd bin dir), so the hermetic
- * env must be in place before this import. It is dynamic because a bundler hoists static imports.
- */
-export function loadPi(agentDir: string): Promise<Pi> {
-  process.env.PI_OFFLINE = "1";
-  process.env.PI_CODING_AGENT_DIR = agentDir;
-  return import("@earendil-works/pi-coding-agent");
-}
-
-/** Scratch is the only writable location; Pi's bash tool spills oversized output to os.tmpdir(). */
-export function useScratch(scratchDir: string): string {
+/** Scratch is the only writable location; the bash tool spills oversized output to os.tmpdir(). */
+export function useScratch(scratchDir: string): void {
   mkdirSync(scratchDir, { recursive: true });
   process.env.TMPDIR = scratchDir;
-  return join(scratchDir, ".pi-agent");
 }
 
-/** In-memory credentials and no models.json: nothing is read from or written to ~/.pi. */
-export function createModelRuntime(pi: Pi): Promise<PiSdk.ModelRuntime> {
-  return pi.ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null });
+/** The built-in provider catalog with in-memory credentials: the key is passed per request, nothing is stored. */
+export function createModels(): MutableModels {
+  return builtinModels({ credentials: new InMemoryCredentialStore() });
 }
 
 /** Applies the Anthropic thinking token budget only for anthropic-messages models; others use effort levels. */
@@ -85,24 +74,6 @@ export function capMaxTokens(model: Model, level: ThinkingLevel): Model {
   if (model.api !== "anthropic-messages") return model;
   const thinking = level === "off" ? 0 : THINKING_BUDGETS[level];
   return { ...model, maxTokens: Math.min(model.maxTokens, MAX_OUTPUT_TOKENS + thinking) };
-}
-
-/** No extensions, skills, prompt templates, themes or AGENTS.md; the system prompt is used verbatim. */
-export function hermeticResourceLoader(pi: Pi, systemPrompt: string): PiSdk.ResourceLoader {
-  const runtime = pi.createExtensionRuntime();
-  return {
-    getExtensions: () => ({ extensions: [], errors: [], runtime }),
-    getSkills: () => ({ skills: [], diagnostics: [] }),
-    getPrompts: () => ({ prompts: [], diagnostics: [] }),
-    getThemes: () => ({ themes: [], diagnostics: [] }),
-    getAgentsFiles: () => ({ agentsFiles: [] }),
-    getSystemPrompt: () => systemPrompt,
-    getSystemPromptSource: () => undefined,
-    getAppendSystemPrompt: () => [],
-    getAppendSystemPromptSources: () => [],
-    extendResources: () => {},
-    reload: async () => {},
-  };
 }
 
 type WithoutAt<E> = E extends unknown ? Omit<E, "at"> : never;
@@ -218,20 +189,18 @@ export async function main(argv: string[], io: MainIO = processIO()): Promise<nu
   const provider = input.model_provider;
   const apiKey = apiKeyFor(creds, provider);
   try {
-    const pi = await loadPi(useScratch(input.scratch_dir));
-    const modelRuntime = await createModelRuntime(pi);
-    const requested = modelRuntime.getModel(provider, input.model);
-    if (!requested) return fail("invalid_input", `unknown model "${provider}/${input.model}" (not in the Pi ${pi.VERSION} registry)`);
+    useScratch(input.scratch_dir);
+    const models = createModels();
+    const requested = models.getModel(provider, input.model);
+    if (!requested) return fail("invalid_input", `unknown model "${provider}/${input.model}" (not in the Pi ${PI_VERSION} registry)`);
 
     let model = requested;
     if (args.faux) {
-      model = registerFauxModel(modelRuntime, (io.fauxScript ?? defaultFauxScript)(input)).model;
-    } else if (apiKey) {
-      await modelRuntime.setRuntimeApiKey(provider, apiKey);
-    } else {
+      model = registerFauxModel(models, (io.fauxScript ?? defaultFauxScript)(input));
+    } else if (!apiKey) {
       return fail("agent_error", `no API key for provider "${provider}": pass --key-file or set the provider's env var`);
     }
-    return await runSession({ pi, input, modelRuntime, model: capMaxTokens(model, input.thinking_level), emit, startedAt });
+    return await runSession({ input, models, apiKey, model: capMaxTokens(model, input.thinking_level), emit, startedAt });
   } catch (err) {
     console.error(err);
     if (!emit.terminated) return fail("agent_error", errorMessage(err));
@@ -257,15 +226,13 @@ function parseInput(raw: string): RunnerInput | string {
 }
 
 async function selfTest(io: MainIO): Promise<number> {
-  const pi = await loadPi(join(tmpdir(), "triage-runner-self-test"));
-  const modelRuntime = await createModelRuntime(pi);
+  const models = createModels();
   const errors: string[] = [];
   for (const p of SUPPORTED_PROVIDERS) {
-    const models = modelRuntime.getModels(p);
-    if (!models.length) errors.push(`no models for provider "${p}"`);
+    if (!models.getModels(p).length) errors.push(`no models for provider "${p}"`);
   }
   const ok = errors.length === 0;
-  const report = { ok, pi_version: pi.VERSION, prompt_version: PROMPT_VERSION, node: process.version, ...(ok ? {} : { errors }) };
+  const report = { ok, pi_version: PI_VERSION, prompt_version: PROMPT_VERSION, node: process.version, ...(ok ? {} : { errors }) };
   await io.write(`${JSON.stringify(report)}\n`);
   return ok ? RUNNER_EXIT.ok : RUNNER_EXIT.error;
 }
@@ -287,6 +254,6 @@ function isDirectory(path: string): boolean {
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const code = await main(process.argv.slice(2));
   process.exitCode = code;
-  // Output is flushed; don't let lingering keep-alive sockets or timers inside Pi hold the process open.
+  // Output is flushed; don't let lingering keep-alive sockets or timers in the provider SDKs hold the process open.
   setTimeout(() => process.exit(code), 1_000).unref();
 }

@@ -114,7 +114,7 @@ describe("bundled runner (runner.mjs)", { timeout: 30_000 }, () => {
     expect(pkg).toEqual({
       type: "module",
       private: true,
-      dependencies: { "@earendil-works/pi-coding-agent": "0.83.0", "@earendil-works/pi-ai": "0.83.0", typebox: "1.3.7" },
+      dependencies: { "@earendil-works/pi-agent-core": "0.83.0", "@earendil-works/pi-ai": "0.83.0", typebox: "1.3.7" },
     });
   });
 });
@@ -221,6 +221,15 @@ describe("run limits", { timeout: 30_000 }, () => {
     expect(terminal(events)).toMatchObject({ type: "error", code: "agent_error", message: expect.stringContaining("invalid x-api-key") });
     expect(code).toBe(1);
   });
+
+  it("retries a transient model error and carries on from the same turn", async () => {
+    const fx = makeFixture();
+    const overloaded = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: Overloaded" });
+    const { code, events } = await runScripted(makeInput(fx), () => [call("ls", {}), overloaded(), call(SUBMIT, CLARIFY)]);
+    expect(toolResults(events).map((r) => r.tool)).toEqual(["ls", SUBMIT]);
+    expect(terminal(events)).toMatchObject({ type: "result", result: CLARIFY });
+    expect(code).toBe(0);
+  });
 });
 
 const ctx = { scratchDir: "/scratch" };
@@ -299,15 +308,48 @@ describe("bash tool", { timeout: 30_000 }, () => {
     expect(code).toBe(0);
   });
 
-  it("points the model at bash when rg/fd are unavailable", async () => {
+  it("searches through bash, and runs it with only the allowlisted env", async () => {
     const fx = makeFixture();
+    process.env.RENDER_API_KEY = "rnd-not-for-the-model";
+    try {
+      const { events } = await runScripted(makeInput(fx), () => [
+        call("bash", { command: `git -C ${REPO} grep -n MAX_DELAY_MS -- src` }),
+        call("bash", { command: "env" }),
+        call(SUBMIT, CLARIFY),
+      ]);
+      const [grep, env] = toolResults(events);
+      expect(grep).toMatchObject({ is_error: false, output_preview: expect.stringContaining("src/retry.ts:1:") });
+      expect(env?.output_preview).toContain(`HOME=${fx.scratchDir}`);
+      expect(env?.output_preview).not.toContain("RENDER_API_KEY");
+    } finally {
+      delete process.env.RENDER_API_KEY;
+    }
+  });
+});
+
+describe("ls and read tools", { timeout: 30_000 }, () => {
+  it("lists directories with a trailing slash, relative to the repos root", async () => {
+    const fx = makeFixture();
+    const { events } = await runScripted(makeInput(fx), () => [call("ls", { path: REPO }), call(SUBMIT, CLARIFY)]);
+    const [ls] = toolResults(events);
+    expect(ls).toMatchObject({ is_error: false });
+    expect(ls?.output_preview.split("\n")).toEqual([".git/", "escape.txt", "README.md", "src/"]);
+  });
+
+  it("reads line ranges and leaves images out of the model's context", async () => {
+    const fx = makeFixture();
+    const png = Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000", "hex");
+    writeFileSync(join(fx.scratchDir, "pixel.png"), png);
     const { events } = await runScripted(makeInput(fx), () => [
-      call("find", { pattern: "*.md", path: REPO }),
-      call("submit_investigation", CLARIFY),
+      call("read", { path: `${REPO}/README.md`, offset: 2, limit: 2 }),
+      call("read", { path: join(fx.scratchDir, "pixel.png") }),
+      call(SUBMIT, CLARIFY),
     ]);
-    const [find] = toolResults(events);
-    if (find?.is_error) expect(find.output_preview).toContain("Use the bash tool instead");
-    else expect(find?.output_preview).toContain("README.md");
+    const [text, image] = toolResults(events);
+    expect(text?.output_preview).toContain("readme line 2\nreadme line 3");
+    expect(text?.output_preview).not.toContain("readme line 4");
+    expect(image?.output_preview).toContain("[image omitted]");
+    expect(image?.output_preview).not.toContain("[image]");
   });
 });
 
@@ -421,7 +463,7 @@ describe("submit_investigation in a run", { timeout: 30_000 }, () => {
 });
 
 const ALLOWED_EXTERNAL = new Set([
-  "@earendil-works/pi-coding-agent",
+  "@earendil-works/pi-agent-core",
   "@earendil-works/pi-ai",
   "typebox",
 ]);

@@ -3,25 +3,25 @@ import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RunnerInput } from "../types.ts";
 import {
-  type FauxProviderHandle,
   type FauxResponseStep,
+  type MutableModels,
   fauxAssistantMessage,
   fauxProvider,
   fauxText,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Model } from "./main.ts";
 import { SUBMIT_TOOL } from "./submit.ts";
 
 export const FAUX_MODEL = "faux";
 export type FauxScript = (input: RunnerInput) => FauxResponseStep[];
 
-export function registerFauxModel(modelRuntime: ModelRuntime, steps: FauxResponseStep[]): { model: Model; faux: FauxProviderHandle } {
+/** Adds a provider that replays `steps` instead of calling a model, and returns its model. */
+export function registerFauxModel(models: MutableModels, steps: FauxResponseStep[]): Model {
   const faux = fauxProvider({ provider: FAUX_MODEL, models: [{ id: FAUX_MODEL, reasoning: false }] });
-  modelRuntime.registerNativeProvider(faux.provider);
+  models.setProvider(faux.provider);
   faux.setResponses(steps);
-  return { model: faux.getModel(), faux };
+  return faux.getModel();
 }
 
 const toolUse = { stopReason: "toolUse" } as const;

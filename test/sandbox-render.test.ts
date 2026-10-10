@@ -341,7 +341,7 @@ describe("buildSnapshot", () => {
       ]),
     );
     expect(files.get("runner/runner.mjs")).toContain("submit_investigation");
-    expect(JSON.parse(files.get("runner/package.json")!).dependencies).toHaveProperty("@earendil-works/pi-coding-agent");
+    expect(JSON.parse(files.get("runner/package.json")!).dependencies).toHaveProperty("@earendil-works/pi-agent-core");
     // Deleted scripts must not be in the archive
     for (const gone of ["prepare.sh", "clone.sh", "scrub-credentials.sh", "lockdown.sh", "write-manifest.mjs"]) {
       expect([...files.keys()]).not.toContain(gone);

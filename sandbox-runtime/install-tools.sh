@@ -26,8 +26,6 @@ if [ "$(id -u)" = 0 ] && have apt-get; then
   pkgs=""
   have git || pkgs="$pkgs git"
   have rg || pkgs="$pkgs ripgrep"
-  # Pi's find tool needs fd; Debian ships it as fdfind.
-  have fd || have fdfind || pkgs="$pkgs fd-find"
   have timeout || pkgs="$pkgs coreutils"
   have curl || have wget || pkgs="$pkgs curl"
   have setpriv || have runuser || have su || pkgs="$pkgs util-linux"
@@ -40,7 +38,6 @@ if [ "$(id -u)" = 0 ] && have apt-get; then
     apt-get install -y -qq --no-install-recommends ca-certificates $pkgs >&2
     rm -rf /var/lib/apt/lists/*
   fi
-  if ! have fd && have fdfind; then ln -sf "$(command -v fdfind)" /usr/local/bin/fd; fi
 fi
 
 case "$(uname -m)" in
@@ -80,5 +77,4 @@ export PATH="$app/bin:$app/node/bin:$PATH"
 missing=""
 for tool in git rg timeout node npm tar; do have "$tool" || missing="$missing $tool"; done
 if [ -n "$missing" ]; then log "missing tools:$missing (git and coreutils can only be installed as root via apt-get)"; exit 1; fi
-have fd || log "fd not installed: Pi's find tool will be unavailable (the agent falls back to bash find)"
 log "git $(git --version | cut -d' ' -f3), rg $(rg --version | head -n 1 | cut -d' ' -f2), node $(node --version)"

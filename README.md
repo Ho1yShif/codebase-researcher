@@ -330,7 +330,7 @@ src/
     main.ts               # runner entry point: reads input, loads credentials, starts the agent
     session.ts            # agent session: system prompt, tools, turn loop, submission reminder
     core-prompt.md        # core section of the system prompt (bundled into the runner)
-    tools.ts              # read-only shell policy, safe bash tool, search tool fallbacks
+    tools.ts              # read-only shell policy; the read, ls, and safe bash tools
     submit.ts             # submit_investigation tool: validates citations against the checkout
     faux.ts               # deterministic --faux mode for testing without a model
 sandbox-runtime/          # copied into the builder sandbox and baked into the snapshot
