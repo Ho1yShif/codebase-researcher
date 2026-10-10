@@ -77,22 +77,25 @@ export function parseLsRemote(out: string, branch?: string): { branch: string; c
 //
 // Each step is a direct Sandbox API call (exec / upload) in an allow-all builder sandbox:
 //
-//   1. Upload runtime files (install-tools.sh, as-runner.sh, run-investigation.sh, verify.sh, runner/)
+//   1. Upload sandbox-runtime/ and the runner bundle to a staging dir
 //   2. Install tools (git, node, ripgrep) via install-tools.sh
 //   3. Detect node path and privilege-drop tool, create runner user, write env
 //   4. Install runner npm deps, set permissions, self-test
-//   5. Upload per-host credentials, clone each repo, scrub credentials
+//   5. Upload per-host credentials, clone each repo, scrub credentials (build/ scripts)
 //   6. Upload the manifest
-//   7. Lockdown (chown root, chmod read-only, execute-only node)
+//   7. Lockdown (chown root, chmod read-only, execute-only node), delete the staging dir
 //   8. verify.sh, then snapshot
 
 const STAGE = "/tmp/triage-stage";
+const STAGE_CREDS = `${STAGE}/creds`;
 const SAFE_REF = /^\w[\w./-]*$/;
 const SAFE_NAME = /^[\w.-]+$/;
 const SANDBOX_GITCONFIG = `[safe]\n\tdirectory = *\n[core]\n\tfsmonitor = false\n[gc]\n\tauto = 0\n`;
 
-/** The runtime scripts uploaded to each builder sandbox alongside the runner bundle. */
-export const STAGE_SCRIPTS = ["install-tools.sh", "as-runner.sh", "run-investigation.sh", "verify.sh"] as const;
+/** Copied into the app dir and kept in the snapshot. */
+export const RUNTIME_SCRIPTS = ["install-tools.sh", "as-runner.sh", "run-investigation.sh", "verify.sh"] as const;
+/** Builder-only: they stay in the staging dir, which is deleted before the snapshot. */
+export const BUILD_SCRIPTS = ["build/git-credential-staged.sh", "build/scrub-credentials.sh"] as const;
 
 /** Builds one named snapshot containing the runner and exactly these repository heads. */
 export async function buildSnapshot(
@@ -144,14 +147,14 @@ export async function buildSnapshot(
 
     // ── Clone: upload credentials, clone each repo, then scrub ──────
     for (const [host, { username, token }] of Object.entries(client.cfg.hostCredentials)) {
-      await client.upload(id, `${STAGE}/creds/${host}`, `${username}\n${token}`);
+      await client.upload(id, `${STAGE_CREDS}/${host}`, `${username}\n${token}`);
     }
     for (const h of heads) {
       const url = h.url ?? `https://github.com/${h.repository}.git`;
       if (!/^https:\/\//.test(url)) throw new Error(`${h.repository}: only https:// clone URLs are supported`);
       await client.check(id, cloneCommand(h, url), prepare);
     }
-    const scrub = await client.exec(id, `bash -c ${shq(SCRUB_SCRIPT)}`, prepare);
+    const scrub = await client.exec(id, `bash ${STAGE}/build/scrub-credentials.sh ${STAGE_CREDS} ${SANDBOX_REPOS}`, prepare);
     if (scrub.exitCode !== 0) throw new Error(`credential scrub failed: ${(scrub.stderr || scrub.stdout).trim().slice(-2000)}`);
 
     // ── Finalize: manifest, lockdown, verify, snapshot ──────────────
@@ -214,13 +217,7 @@ function envFileContent(nodePath: string, dropTool: string): string {
 /** The git clone + configure + detach command for one repository. */
 function cloneCommand(h: { repository: string; branch: string; commit: string }, url: string): string {
   const dest = `${SANDBOX_REPOS}/${h.repository}`;
-  const credHelper =
-    'credential.helper=!f() { test "$1" = get || return 0; host=""; ' +
-    'while IFS= read -r line; do case "$line" in host=*) host="${line#host=}";; esac; done; ' +
-    'case "$host" in ""|*[!A-Za-z0-9.:-]*) return 0;; esac; ' +
-    "cf=\"" + STAGE + '/creds/$host"; [ -s "$cf" ] || return 0; ' +
-    '{ IFS= read -r u && IFS= read -r p; } < "$cf"; ' +
-    'printf "username=%s\\npassword=%s\\n" "$u" "$p"; }; f';
+  const credHelper = `credential.helper=!bash ${STAGE}/build/git-credential-staged.sh ${STAGE_CREDS}`;
   return [
     `mkdir -p $(dirname ${shq(dest)})`,
     `GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c ${shq(credHelper)} clone --quiet --single-branch --branch ${shq(h.branch)} --no-tags -- ${shq(url)} ${shq(dest)}`,
@@ -231,38 +228,6 @@ function cloneCommand(h: { repository: string; branch: string; commit: string },
     `head=$(git -C ${shq(dest)} rev-parse HEAD) && [ "$head" = ${shq(h.commit)} ]`,
   ].join(" && ");
 }
-
-/** Verifies no credential values leaked into repos or git configs, then deletes the credential files. */
-const SCRUB_SCRIPT = [
-  "set -e",
-  `repos=$(find ${SANDBOX_REPOS} -mindepth 3 -maxdepth 3 -name .git -type d -exec dirname {} \\;)`,
-  `[ -n "$repos" ] || { echo "no repos under ${SANDBOX_REPOS}"; exit 1; }`,
-  `if [ -d ${STAGE}/creds ]; then`,
-  `  for cf in ${STAGE}/creds/*; do`,
-  `    [ -s "$cf" ] || continue`,
-  "    tmp=$(mktemp); sed -n '2p' \"$cf\" > \"$tmp\"",
-  '    for f in ~/.gitconfig ~/.git-credentials ~/.config/git /etc/gitconfig; do',
-  '      [ -e "$f" ] && grep -rqsF -f "$tmp" -- "$f" && { rm -f "$tmp"; echo "token from $(basename "$cf") in $f"; exit 1; }',
-  "    done",
-  '    while IFS= read -r r; do',
-  '      grep -rqsF --exclude-dir=objects -f "$tmp" -- "$r/.git" && { rm -f "$tmp"; echo "token from $(basename "$cf") in $r/.git"; exit 1; }',
-  '    done <<< "$repos"',
-  '    rm -f "$tmp"',
-  "  done",
-  "fi",
-  `rm -rf ${STAGE}/creds`,
-  `[ ! -e ${STAGE}/creds ] || { echo "could not delete creds"; exit 1; }`,
-  '[ ! -e ~/.git-credentials ] || { echo "~/.git-credentials exists"; exit 1; }',
-  "pattern='^(credential\\\\.|url\\\\..*\\\\.insteadof|http\\\\..*\\\\.extraheader)'",
-  'for scope in --system --global; do',
-  '  git config "$scope" --get-regexp "$pattern" 2>/dev/null && { echo "credential settings in git $scope config"; exit 1; }',
-  "done",
-  'while IFS= read -r r; do',
-  '  git -c safe.directory=\'*\' -C "$r" config --local --get-regexp "$pattern" 2>/dev/null && { echo "$r: credential settings"; exit 1; }',
-  '  url=$(git -c safe.directory=\'*\' -C "$r" config --local --get remote.origin.url 2>/dev/null || true)',
-  '  case "$url" in *@*) echo "$r: remote URL carries credentials"; exit 1;; esac',
-  'done <<< "$repos"',
-].join("\n");
 
 /** Makes repos root-owned and read-only; gives scratch to the runner user; installs execute-only node. */
 function lockdownCommand(nodePath: string): string {
@@ -296,8 +261,9 @@ async function stageArchive({ sandboxDir }: RenderConfig): Promise<Buffer> {
   const dir = await mkdtemp(join(tmpdir(), "triage-stage-"));
   try {
     await mkdir(join(dir, "runner"));
+    await mkdir(join(dir, "build"));
     for (const [name, contents] of Object.entries(bundle)) await writeFile(join(dir, "runner", name), contents);
-    for (const name of STAGE_SCRIPTS) await cp(join(sandboxDir, name), join(dir, name));
+    for (const name of [...RUNTIME_SCRIPTS, ...BUILD_SCRIPTS]) await cp(join(sandboxDir, name), join(dir, name));
     const chunks: Buffer[] = [];
     for await (const chunk of createTar({ cwd: dir, portable: true }, await readdir(dir))) chunks.push(chunk);
     return Buffer.concat(chunks);

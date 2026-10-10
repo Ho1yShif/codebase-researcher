@@ -148,7 +148,8 @@ export async function runInvestigation(client: SandboxClient, id: string, opts: 
   } catch (err) {
     if (!streaming && !signal.aborted) throw err;
   }
-  // A dropped exec stream doesn't stop the run, so wait for the exit status run-investigation.sh writes.
+  // A dropped exec stream doesn't stop the run, and the API can't reattach to it, so wait for the exit
+  // status run-investigation.sh writes to a file instead.
   if (exitCode === null && !signal.aborted) exitCode = await awaitExitFile(client, id, runDir, signal);
   const output = await readRunFile(client, id, `${runDir}.jsonl`, AbortSignal.timeout(client.t.verifyTimeoutMs));
   return {

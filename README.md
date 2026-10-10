@@ -8,6 +8,8 @@ The button deploys this repository as is, investigating its example corpus: thre
 
 Each question runs inside a fresh, isolated Sandbox restored from an hourly snapshot of your repositories. An AI coding agent reads the code with read-only tools, validates every citation against the checkout, and returns a structured answer: short answer, confidence level, observations, inferences, unknowns, file-and-line evidence, a suggested owner, and an escalation-ready question for engineering.
 
+**Learning Render Sandboxes?** Start with [`examples/hello-sandbox.ts`](examples/hello-sandbox.ts), a 70-line round trip through the Sandbox API, then read [docs/sandboxes.md](docs/sandboxes.md), which walks through how this project builds, restores, verifies, and secures its sandboxes. The reasoning behind the overall design is in [docs/design.md](docs/design.md).
+
 ## How a question flows
 
 1. A caller posts a question to `POST /v1/questions` (or mentions the bot in Slack, which calls the same endpoint internally). The API starts an `answer_question` workflow run and returns `202 { id }`.
@@ -307,6 +309,11 @@ prompt.md                 # domain section of the system prompt
 render.yaml               # Blueprint: three services + env group
 .env.example              # all env vars with comments
 package.json              # scripts: start:api, start:workflow, refresh, typecheck, test
+docs/
+  design.md               # architecture, the security boundary, residual risks
+  sandboxes.md            # walkthrough of the Sandbox integration: what is essential, hardening, or an SDK gap
+examples/
+  hello-sandbox.ts        # minimal Sandbox round trip: create, wait, upload, exec, download, terminate
 src/
   api.ts                  # API service entry: Hono HTTP server for /v1/questions, /slack/events, /slack/deliver
   workflow.ts             # workflow service entry: config, timeouts, task registrations
@@ -339,6 +346,9 @@ sandbox-runtime/          # copied into the builder sandbox and baked into the s
   run-investigation.sh    # launches the runner as the unprivileged user under coreutils timeout
   as-runner.sh            # privilege drop wrapper (setpriv/runuser/su)
   deps/                   # package.json + lockfile for the runner's unbundled dependencies
+  build/                  # builder-only, deleted before the snapshot
+    git-credential-staged.sh  # git credential helper that reads the staged per-host token files
+    scrub-credentials.sh      # fails the build if a token leaked, then deletes the staged credentials
 ```
 
 ## Local development

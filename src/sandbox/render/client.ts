@@ -31,14 +31,21 @@ const DEFAULT_TIMINGS: RenderTimings = {
 
 const OUTPUT_TAIL = 64 * 1024;
 export const TRANSIENT = [429, 503];
-/** Statuses a sandbox returns while it is still coming up. */
+/**
+ * A just-created sandbox can answer 404 to `get` and to `exec` for a short while (and `exec` can fail
+ * briefly after it reports `running`), so readiness checks treat 404 as "not yet".
+ */
 const READY_RETRY = [404, ...TRANSIENT];
 
 type ExecOptions = { timeoutMs: number; waitReady?: boolean; signal?: AbortSignal };
 
 /**
- * The SDK's sandbox client with what it leaves to callers: pacing for the workspace rate limit,
- * retries on transient statuses, waiting for a sandbox to run, and collecting exec output.
+ * The SDK's sandbox client (@renderinc/sdk 1.2.0, experimental) plus what it leaves to callers:
+ * - pacing: the Sandbox API allows 100 requests/min per workspace and the SDK neither paces nor retries 429s;
+ * - retries on 429/503, which the SDK surfaces as errors;
+ * - `waitRunning`: `create` returns while the sandbox is still `creating`, and there is no wait helper;
+ * - `exec` collection: the SDK returns the raw event stream; `exec` here gathers output and the exit code.
+ * Drop each piece when the SDK grows the equivalent.
  */
 export class SandboxClient {
   readonly t: RenderTimings;

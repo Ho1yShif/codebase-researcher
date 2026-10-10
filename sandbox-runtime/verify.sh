@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verifies a prepared sandbox: the builder before it is snapshotted, and every pool member after restore.
+# Verifies a prepared sandbox: the builder before it is snapshotted, and every sandbox restored from the snapshot.
 # Prints one JSON line describing the sandbox (runner user, Pi/prompt versions, runner dumpability, DNS).
 # Usage: verify.sh [--deny-probe URL] [--allow-probe URL]   (egress probes run as the runner user)
 set -euo pipefail

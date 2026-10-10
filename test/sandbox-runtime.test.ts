@@ -144,3 +144,51 @@ describe("sandbox runtime scripts", { timeout: 30_000 }, () => {
     expect(existsSync(join(runDir, "key"))).toBe(false);
   });
 });
+
+describe("builder-only scripts", { timeout: 30_000 }, () => {
+  const TOKEN = "ghp_scrubTestToken0000000000000000000";
+  const helper = join(SANDBOX, "build/git-credential-staged.sh");
+  const scrub = join(SANDBOX, "build/scrub-credentials.sh");
+
+  async function stageCreds(): Promise<string> {
+    const dir = await mkdtemp(join(tmp, "creds-"));
+    await writeFile(join(dir, "github.com"), `x-access-token\n${TOKEN}`);
+    return dir;
+  }
+
+  function askHelper(credsDir: string, action: string, request: string) {
+    return new Promise<string>((resolve, reject) => {
+      const child = execFile("bash", [helper, credsDir, action], { env }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+      child.stdin!.end(request);
+    });
+  }
+
+  it("git-credential-staged.sh answers get for a staged host only", async () => {
+    const creds = await stageCreds();
+    expect(await askHelper(creds, "get", "protocol=https\nhost=github.com\n\n")).toBe(`username=x-access-token\npassword=${TOKEN}\n`);
+    expect(await askHelper(creds, "get", "protocol=https\nhost=gitlab.com\n\n")).toBe("");
+    expect(await askHelper(creds, "get", "protocol=https\nhost=../github.com\n\n")).toBe("");
+    expect(await askHelper(creds, "store", "protocol=https\nhost=github.com\n\n")).toBe("");
+  });
+
+  it("scrub-credentials.sh deletes staged credentials when no token leaked", async () => {
+    const creds = await stageCreds();
+    const res = await bash(scrub, [creds, join(tmp, "dx/repos")]);
+    expect(res.stderr).toBe("");
+    expect(res.code).toBe(0);
+    expect(existsSync(creds)).toBe(false);
+  });
+
+  it("scrub-credentials.sh fails, keeping the evidence, when a token reached a repo's .git", async () => {
+    const creds = await stageCreds();
+    await git(["-C", repo, "config", "remote.origin.pushurl", `https://x:${TOKEN}@github.com/acme/widget.git`]);
+    try {
+      const res = await bash(scrub, [creds, join(tmp, "dx/repos")]);
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain("token for github.com found in");
+      expect(res.stderr).not.toContain(TOKEN);
+    } finally {
+      await git(["-C", repo, "config", "--unset", "remote.origin.pushurl"]);
+    }
+  });
+});

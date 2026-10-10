@@ -288,8 +288,8 @@ describe("buildSnapshot", () => {
       expect(fake.calls.indexOf(clone)).toBeGreaterThan(tokenUpload);
     }
 
-    // Scrub exec (the bash -c script that deletes creds) must come after clones
-    const scrubExec = fake.calls.findIndex((c) => c.op === "exec" && c.command.includes("bash -c") && c.command.includes("creds"));
+    // The scrub (which deletes creds) must come after the clones
+    const scrubExec = fake.calls.findIndex((c) => c.op === "exec" && c.command.includes("build/scrub-credentials.sh"));
     expect(scrubExec).toBeGreaterThan(fake.calls.indexOf(cloneExecs.at(-1)!));
 
     const creates = fake.calls.filter((c) => c.op === "create");
@@ -317,7 +317,7 @@ describe("buildSnapshot", () => {
     expect(credUpload).toBeDefined();
     expect(credUpload!.data).toBe(`x-access-token\n${GH_TOKEN}`);
 
-    // Stage archive contains only the 4 runtime scripts + runner bundle (no prepare.sh, clone.sh, etc.)
+    // Stage archive: the runtime scripts, the builder-only scripts under build/, and the runner bundle
     const files = new Map<string, string>();
     await pipeline(
       Readable.from(uploads[0]!.data as Buffer),
@@ -329,23 +329,25 @@ describe("buildSnapshot", () => {
         },
       }),
     );
-    expect([...files.keys()].sort()).toEqual(
-      expect.arrayContaining([
-        "runner/runner.mjs",
-        "runner/package.json",
-        "runner/package-lock.json",
-        "install-tools.sh",
-        "as-runner.sh",
-        "run-investigation.sh",
-        "verify.sh",
-      ]),
-    );
+    expect([...files.keys()].filter((p) => !p.endsWith("/")).sort()).toEqual([
+      "as-runner.sh",
+      "build/git-credential-staged.sh",
+      "build/scrub-credentials.sh",
+      "install-tools.sh",
+      "run-investigation.sh",
+      "runner/package-lock.json",
+      "runner/package.json",
+      "runner/runner.mjs",
+      "verify.sh",
+    ]);
     expect(files.get("runner/runner.mjs")).toContain("submit_investigation");
     expect(JSON.parse(files.get("runner/package.json")!).dependencies).toHaveProperty("@earendil-works/pi-agent-core");
-    // Deleted scripts must not be in the archive
-    for (const gone of ["prepare.sh", "clone.sh", "scrub-credentials.sh", "lockdown.sh", "write-manifest.mjs"]) {
-      expect([...files.keys()]).not.toContain(gone);
-    }
+
+    // build/ scripts stay in the staging dir, which is deleted before verification and the snapshot
+    expect(commands.some((c) => c.includes("cp /tmp/triage-stage/*.sh /opt/triage/app/"))).toBe(true);
+    const removeStage = fake.calls.findIndex((c) => c.op === "exec" && c.command === "rm -rf /tmp/triage-stage");
+    expect(removeStage).toBeGreaterThan(scrubExec);
+    expect(removeStage).toBeLessThan(fake.calls.findIndex((c) => c.op === "snapshot.create"));
 
     expect(manifestDigest(uploadedManifest)).toBe(manifestDigest({ profile: "default", created_at: "", repos: heads }));
   });
