@@ -53,6 +53,8 @@ const info = () =>
 class FakeApi {
   calls: Call[] = [];
   createError?: (input: Parameters<SandboxApi["create"]>[0]) => Error | undefined;
+  /** The policy `create` reports; defaults to echoing the requested one. */
+  createdPolicy?: unknown;
   exec_: ExecHandler = () => [exit(0)];
   /** Contents of sandbox files other than manifest.json; undefined means the download fails. */
   file_: (path: string) => string | undefined = () => undefined;
@@ -76,7 +78,7 @@ class FakeApi {
           id,
           status: "creating",
           plan: "starter",
-          networkPolicy: input.networkPolicy ?? { default: "allow-all" },
+          networkPolicy: (self.createdPolicy ?? input.networkPolicy ?? { type: "allow-all" }) as NonNullable<typeof input.networkPolicy>,
           region: "oregon",
           timeoutSeconds: input.timeoutSeconds ?? 7200,
           createdAt: new Date().toISOString(),
@@ -294,7 +296,7 @@ describe("buildSnapshot", () => {
     expect(scrubExec).toBeGreaterThan(fake.calls.indexOf(cloneExecs.at(-1)!));
 
     const creates = fake.calls.filter((c) => c.op === "create");
-    expect(creates[0]!.input).toEqual({ timeoutSeconds: 3_600, networkPolicy: { default: "allow-all" } });
+    expect(creates[0]!.input).toEqual({ timeoutSeconds: 3_600, networkPolicy: { type: "allow-all" } });
     expect(fake.calls.find((c) => c.op === "terminate")!.id).toBe(creates[0]!.id);
     expect(fake.inputs("snapshot.create")).toEqual([{ sandboxId: creates[0]!.id, kind: "filesystem", name: NAME }]);
 
@@ -421,7 +423,7 @@ describe("openRenderSandbox", () => {
     expect(creates[0]!.input).toEqual({
       snapshotName: NAME,
       timeoutSeconds: 1_800,
-      networkPolicy: { default: "allow-list", allowedDomains: ["api.anthropic.com"] },
+      networkPolicy: { type: "allow-list", rules: [{ domain: "api.anthropic.com", protocol: "https" }] },
     });
 
     const commands = fake.commands();
@@ -442,6 +444,19 @@ describe("openRenderSandbox", () => {
     fake.exec_ = (id, command) =>
       command.includes("verify.sh") ? [out("verify: egress to https://example.com is allowed\n", "stderr"), exit(1)] : prepareExec(id, command);
     await expect(openRenderSandbox(client({ default: "deny-all" }), NAME)).rejects.toThrow("verify.sh exited 1");
+    expect(fake.calls.filter((c) => c.op === "terminate")).toHaveLength(1);
+  });
+
+  it("accepts a policy reported with only the deprecated default field", async () => {
+    fake.exec_ = prepareExec;
+    fake.createdPolicy = { default: "allow-list" };
+    await expect(openRenderSandbox(client(), NAME)).resolves.toBeDefined();
+  });
+
+  it("terminates a sandbox created with wider egress than requested", async () => {
+    fake.exec_ = prepareExec;
+    fake.createdPolicy = { type: "allow-all" };
+    await expect(openRenderSandbox(client(), NAME)).rejects.toThrow("refusing to widen egress");
     expect(fake.calls.filter((c) => c.op === "terminate")).toHaveLength(1);
   });
 

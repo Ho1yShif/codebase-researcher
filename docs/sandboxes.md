@@ -116,6 +116,8 @@ The point is to check the sandbox you actually got instead of trusting the steps
 | `waitRunning` | `create` returns while the sandbox is still `creating`, and there's no wait helper |
 | Retrying 404 just after create | A new sandbox briefly answers 404 to `get` and `exec` |
 | Collecting `exec` output | The SDK returns the raw event stream |
+| Sending network policies as `type` plus `rules` ([`wirePolicy`](../src/sandbox/render/sandbox.ts)) | The API replaced `default` plus `allowedDomains`; 1.2.0's types still describe the old shape, and the API ignores `allowedDomains` |
+| Uploading the stage archive as a `.tgz` file and extracting it in the sandbox | The upload endpoint rejects an uncompressed tar of the bundled runner, and doesn't accept the SDK's `application/gzip` type |
 
 `examples/hello-sandbox.ts` has the minimal versions of the last three; you can skip throttling and 429 retries in a script that makes a handful of calls.
 

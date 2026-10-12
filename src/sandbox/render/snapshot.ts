@@ -10,7 +10,7 @@ import { git, shq } from "../interface.ts";
 import { bundleRunner } from "../runner-bundle.ts";
 import { type SandboxApi, type SandboxClient, warn } from "./client.ts";
 import type { RenderConfig } from "./config.ts";
-import { SANDBOX_APP, SANDBOX_REPOS, SANDBOX_ROOT, SANDBOX_RUN_AS, SANDBOX_SCRATCH, verifySandbox } from "./sandbox.ts";
+import { SANDBOX_APP, SANDBOX_REPOS, SANDBOX_ROOT, SANDBOX_RUN_AS, SANDBOX_SCRATCH, verifySandbox, wirePolicy } from "./sandbox.ts";
 
 export type BuiltSnapshot = { id: string; sandboxGroupId: string };
 
@@ -110,7 +110,7 @@ export async function buildSnapshot(
   const prepare = { timeoutMs: t.prepareTimeoutMs };
   const boot = { timeoutMs: t.bootTimeoutMs };
   const { id } = await client.call(() =>
-    client.api.create({ timeoutSeconds: client.cfg.builderTimeoutSeconds, networkPolicy: { default: "allow-all" } }),
+    client.api.create({ timeoutSeconds: client.cfg.builderTimeoutSeconds, networkPolicy: wirePolicy({ default: "allow-all" }) }),
   );
   try {
     await client.waitRunning(id);

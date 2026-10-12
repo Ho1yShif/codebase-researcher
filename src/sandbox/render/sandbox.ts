@@ -61,6 +61,27 @@ function probeArgs(policy: NetworkPolicy): string {
   return ` --deny-probe ${DENY_PROBE_URL}${allowed ? ` --allow-probe ${shq(`https://${allowed}`)}` : ""}`;
 }
 
+// ── Network policy wire format ──────────────────────────────────────────
+
+type WirePolicy = NonNullable<Parameters<SandboxApi["create"]>[0]>["networkPolicy"];
+
+/**
+ * The policy in the shape the API accepts: `type` plus `rules`. SDK 1.2.0's types still describe
+ * `default` plus `allowedDomains`, and the API ignores `allowedDomains`, rejecting the allow-list as empty.
+ */
+export function wirePolicy(policy: NetworkPolicy): WirePolicy {
+  const wire =
+    policy.default === "allow-list"
+      ? { type: policy.default, rules: policy.allowedDomains.map((domain) => ({ domain, protocol: "https" })) }
+      : { type: policy.default };
+  return wire as unknown as WirePolicy;
+}
+
+/** Responses carry `type`; `default` is its deprecated alias and may be absent. */
+function policyType(policy: WirePolicy | undefined): string | undefined {
+  return policy && ((policy as { type?: string }).type ?? policy.default);
+}
+
 // ── Investigation sandboxes ─────────────────────────────────────────────
 
 /**
@@ -76,7 +97,7 @@ export async function openRenderSandbox(client: SandboxClient, snapshotName: str
   let created: Awaited<ReturnType<SandboxApi["create"]>>;
   try {
     created = await client.call(() =>
-      client.api.create({ snapshotName, networkPolicy: policy, timeoutSeconds: client.cfg.investigationTimeoutSeconds }),
+      client.api.create({ snapshotName, networkPolicy: wirePolicy(policy), timeoutSeconds: client.cfg.investigationTimeoutSeconds }),
     );
   } catch (err) {
     if (err instanceof SandboxSnapshotNotFoundError || err instanceof SandboxSnapshotNotReadyError) {
@@ -93,8 +114,9 @@ export async function openRenderSandbox(client: SandboxClient, snapshotName: str
   }
   const { id } = created;
   try {
-    if (created.networkPolicy && created.networkPolicy.default !== policy.default) {
-      throw new Error(`Render created ${id} with networkPolicy ${created.networkPolicy.default}, not ${policy.default}; refusing to widen egress`);
+    const createdType = policyType(created.networkPolicy);
+    if (created.networkPolicy && createdType !== policy.default) {
+      throw new Error(`Render created ${id} with networkPolicy ${createdType}, not ${policy.default}; refusing to widen egress`);
     }
     await client.waitRunning(id);
     const info = await verifySandbox(client, id, { probes: policy, waitReady: true });
