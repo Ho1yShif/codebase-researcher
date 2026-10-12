@@ -14,6 +14,7 @@ import { resolveWorkspaceId, type NetworkPolicy, type RenderConfig } from "../sr
 import { openRenderSandbox, runInvestigation } from "../src/sandbox/render/sandbox.ts";
 import { buildSnapshot, parseLsRemote, pruneSnapshots } from "../src/sandbox/render/snapshot.ts";
 import { runnerInput } from "./helpers.ts";
+import config from "../config.ts";
 
 const GH_TOKEN = "ghp_renderProviderSecret000000000000";
 const MODEL_KEY = "sk-ant-api03-renderProviderSecret";
@@ -354,6 +355,14 @@ describe("buildSnapshot", () => {
     await expect(buildSnapshot(client(), { profile, heads, snapshotName: NAME })).rejects.toThrow("install-tools.sh");
     expect(fake.calls.some((c) => c.op === "upload" && c.path.includes("/creds/"))).toBe(false);
     expect(fake.calls.filter((c) => c.op === "terminate").map((c) => c.id)).toEqual(["sbx-1"]);
+  });
+
+  it("builds from the shipped config.ts", async () => {
+    fake.exec_ = prepareExec;
+    const shipped = { name: config.name, repos: config.repos };
+    await expect(buildSnapshot(client(), { profile: shipped, heads, snapshotName: config.snapshotName })).resolves.toBeDefined();
+    const manifestUpload = fake.calls.find((c) => c.op === "upload" && c.path === "/opt/triage/app/manifest.json");
+    expect(JSON.parse((manifestUpload as { data: string }).data).profile).toBe(config.name);
   });
 
   it("rejects an invalid snapshotName", async () => {

@@ -102,7 +102,6 @@ export async function buildSnapshot(
   client: SandboxClient,
   { profile, heads, snapshotName }: { profile: RepoProfile; heads: RepoManifest["repos"]; snapshotName: string },
 ): Promise<BuiltSnapshot> {
-  if (!SAFE_NAME.test(profile.name)) throw new Error(`profile name ${JSON.stringify(profile.name)} is not [A-Za-z0-9_.-]+`);
   if (!SAFE_NAME.test(snapshotName)) throw new Error(`snapshot name ${JSON.stringify(snapshotName)} is not [A-Za-z0-9_.-]+`);
   for (const h of heads) {
     if (!SAFE_REF.test(h.branch)) throw new Error(`${h.repository}: unsupported branch name ${JSON.stringify(h.branch)}`);
