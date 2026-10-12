@@ -117,9 +117,10 @@ export async function buildSnapshot(
 
     // ── Stage: upload runtime files ──────────────────────────────────
     await client.check(id, `mkdir -p -m 700 ${STAGE}`, { ...boot, waitReady: true });
-    // Gzipped: an uncompressed tar of the bundled runner's JavaScript gets rejected by the upload
-    // endpoint's request filtering.
-    await client.upload(id, STAGE, await stageArchive(client.cfg), { contentType: "application/gzip" });
+    // Uploaded as an opaque .tgz and extracted in the sandbox: the upload endpoint rejects an
+    // uncompressed tar of the bundled runner's JavaScript, and doesn't accept application/gzip.
+    await client.upload(id, `${STAGE}/stage.tgz`, await stageArchive(client.cfg));
+    await client.check(id, `tar -xzf ${STAGE}/stage.tgz -C ${STAGE} && rm ${STAGE}/stage.tgz`, boot);
 
     // ── Setup: directories, tools, environment ──────────────────────
     await client.check(id,
