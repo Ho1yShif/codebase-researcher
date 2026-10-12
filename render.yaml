@@ -1,83 +1,86 @@
-# Three services for code-investigator: Slack endpoint, the answer_question workflow, and the snapshot
-# refresh cron. Region is oregon because Sandboxes early access runs only there. No database.
+# One project with three services: the HTTP API (and optional Slack endpoint), the answer_question
+# workflow, and the snapshot refresh cron. Region is oregon because Sandboxes early access runs only
+# there. No database.
+#
+# Every secret is declared on the service that uses it, not in an env group: the Blueprint form
+# doesn't reliably prompt for sync: false values inside env groups, and an empty one crashes the API.
 
-envVarGroups:
-  - name: code-investigator-shared
-    envVars:
-      - key: RENDER_API_KEY
-        sync: false
-      - key: RENDER_WORKSPACE_ID
-        # Optional when the key can see exactly one workspace.
-        sync: false
+projects:
+  - name: code-investigator
+    environments:
+      - name: production
+        services:
+          - type: web
+            name: code-investigator-api
+            runtime: node
+            region: oregon
+            # Paid instance: a free instance spins down and misses Slack's 3-second deadline.
+            plan: starter
+            buildCommand: pnpm install --frozen-lockfile
+            startCommand: pnpm start:api
+            healthCheckPath: /healthz
+            buildFilter:
+              paths: [src/api.ts, src/slack.ts, src/types.ts, src/callback.ts, config.ts, package.json, pnpm-lock.yaml]
+            envVars:
+              - key: RENDER_API_KEY
+                sync: false
+              - key: API_TOKEN
+                generateValue: true
+              - key: SLACK_SIGNING_SECRET
+                sync: false
+              - key: SLACK_BOT_TOKEN
+                sync: false
+              - key: ALLOWED_CHANNEL_IDS
+                sync: false
+              - key: SLACK_CALLBACK_KEY
+                generateValue: true
+              - key: WORKFLOW_SLUG
+                fromService:
+                  type: workflow
+                  name: code-investigator-workflow
+                  property: slug
 
-services:
-  - type: web
-    name: code-investigator-api
-    runtime: node
-    region: oregon
-    # Paid instance: a free instance spins down and misses Slack's 3-second deadline.
-    plan: starter
-    buildCommand: pnpm install --frozen-lockfile
-    startCommand: pnpm start:api
-    healthCheckPath: /healthz
-    buildFilter:
-      paths: [src/api.ts, src/slack.ts, src/types.ts, src/callback.ts, config.ts, package.json, pnpm-lock.yaml]
-    envVars:
-      - key: API_TOKEN
-        generateValue: true
-      - key: SLACK_SIGNING_SECRET
-        sync: false
-      - key: SLACK_BOT_TOKEN
-        sync: false
-      - key: ALLOWED_CHANNEL_IDS
-        sync: false
-      - key: SLACK_CALLBACK_KEY
-        generateValue: true
-      - fromGroup: code-investigator-shared
-      - key: WORKFLOW_SLUG
-        fromService:
-          type: workflow
-          name: code-investigator-workflow
-          property: slug
+          - type: workflow
+            name: code-investigator-workflow
+            runtime: node
+            region: oregon
+            buildCommand: pnpm install --frozen-lockfile
+            startCommand: pnpm start:workflow
+            buildFilter:
+              paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
+            envVars:
+              - key: RENDER_API_KEY
+                sync: false
+              - key: RENDER_WORKSPACE_ID
+                # Optional when the key can see exactly one workspace.
+                sync: false
+              - key: SANDBOX_PROVIDER
+                value: render
+              - key: MODEL_PROVIDER
+                value: anthropic
+              - key: MODEL
+                value: claude-opus-5
+              # Use a dedicated, spend-capped key: DNS still resolves inside Sandboxes.
+              - key: ANTHROPIC_API_KEY
+                sync: false
+              - key: SANDBOX_NETWORK_POLICY
+                value: allow-list
 
-  - type: workflow
-    name: code-investigator-workflow
-    runtime: node
-    region: oregon
-    buildCommand: pnpm install --frozen-lockfile
-    startCommand: pnpm start:workflow
-    buildFilter:
-      paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
-    # Env groups aren't linked to workflow services, so the shared values are declared here directly.
-    envVars:
-      - key: RENDER_API_KEY
-        sync: false
-      - key: RENDER_WORKSPACE_ID
-        # Optional when the key can see exactly one workspace.
-        sync: false
-      - key: SANDBOX_PROVIDER
-        value: render
-      - key: MODEL_PROVIDER
-        value: anthropic
-      - key: MODEL
-        value: claude-opus-5
-      # Use a dedicated, spend-capped key: DNS still resolves inside Sandboxes.
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: SANDBOX_NETWORK_POLICY
-        value: allow-list
-
-  - type: cron
-    name: code-investigator-snapshots
-    runtime: node
-    region: oregon
-    plan: starter
-    schedule: "0 * * * *"
-    buildCommand: pnpm install --frozen-lockfile
-    startCommand: pnpm refresh
-    buildFilter:
-      paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
-    envVars:
-      - fromGroup: code-investigator-shared
-      - key: GITHUB_TOKEN
-        sync: false
+          - type: cron
+            name: code-investigator-snapshots
+            runtime: node
+            region: oregon
+            plan: starter
+            schedule: "0 * * * *"
+            buildCommand: pnpm install --frozen-lockfile
+            startCommand: pnpm refresh
+            buildFilter:
+              paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
+            envVars:
+              - key: RENDER_API_KEY
+                sync: false
+              - key: RENDER_WORKSPACE_ID
+                # Optional when the key can see exactly one workspace.
+                sync: false
+              - key: GITHUB_TOKEN
+                sync: false
