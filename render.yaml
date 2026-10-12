@@ -70,7 +70,8 @@ projects:
             name: code-investigator-snapshots
             runtime: node
             region: oregon
-            plan: starter
+            # Bundling the runner needs more than starter's 512 MB; the build is killed without a log line.
+            plan: standard
             schedule: "0 * * * *"
             buildCommand: pnpm install --frozen-lockfile
             startCommand: pnpm refresh

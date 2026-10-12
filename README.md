@@ -30,7 +30,7 @@ Security properties of this design:
 ## Prerequisites
 
 - A Render workspace with Sandboxes access, in the **Oregon** region (the only region Sandboxes run in during early access).
-- **Paid instance types** for the API service (a free instance spins down and misses Slack's 3-second deadline) and the cron (starter plan).
+- **Paid instance types** for the API service (a free instance spins down and misses Slack's 3-second deadline) and the cron (standard plan: bundling the runner needs more than 512 MB).
 - A **model API key** (Anthropic by default; see [Choosing a model](#choosing-a-model)). Use a dedicated, spend-capped key.
 - Optionally, a **Slack app** (see [Slack adapter](#slack-adapter)).
 
@@ -51,7 +51,7 @@ Create a Blueprint in the Render Dashboard from your repository. It creates a `c
 
 - `code-investigator-api` (web, starter): the HTTP API and optional Slack adapter.
 - `code-investigator-workflow` (workflow): the `answer_question` task and its `investigate` and `deliver` subtasks.
-- `code-investigator-snapshots` (cron, hourly): snapshot refresh.
+- `code-investigator-snapshots` (cron, standard, hourly): snapshot refresh.
 
 ### 3. Paste secrets
 

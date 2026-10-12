@@ -312,7 +312,7 @@ describe("buildSnapshot", () => {
     expect(commands.every((c) => !/\bnpm\b/.test(c))).toBe(true);
 
     const uploads = fake.calls.filter((c) => c.op === "upload");
-    expect(uploads[0]!.contentType).toBe("application/x-tar");
+    expect(uploads[0]!.contentType).toBe("application/gzip");
     const credUpload = uploads.find((u) => u.path.includes("/creds/"));
     expect(credUpload).toBeDefined();
     expect(credUpload!.data).toBe(`x-access-token\n${GH_TOKEN}`);

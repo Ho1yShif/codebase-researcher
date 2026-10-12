@@ -117,7 +117,9 @@ export async function buildSnapshot(
 
     // ── Stage: upload runtime files ──────────────────────────────────
     await client.check(id, `mkdir -p -m 700 ${STAGE}`, { ...boot, waitReady: true });
-    await client.upload(id, STAGE, await stageArchive(client.cfg), { contentType: "application/x-tar" });
+    // Gzipped: an uncompressed tar of the bundled runner's JavaScript gets rejected by the upload
+    // endpoint's request filtering.
+    await client.upload(id, STAGE, await stageArchive(client.cfg), { contentType: "application/gzip" });
 
     // ── Setup: directories, tools, environment ──────────────────────
     await client.check(id,
@@ -251,7 +253,7 @@ async function createSnapshot(client: SandboxClient, sandboxId: string, name: st
   return snap;
 }
 
-/** A tar of the scripts and a freshly built, self-contained runner bundle. */
+/** A gzipped tar of the scripts and a freshly built, self-contained runner bundle. */
 async function stageArchive({ sandboxDir }: RenderConfig): Promise<Buffer> {
   const bundle = await bundleRunner();
   const dir = await mkdtemp(join(tmpdir(), "triage-stage-"));
@@ -261,7 +263,7 @@ async function stageArchive({ sandboxDir }: RenderConfig): Promise<Buffer> {
     await writeFile(join(dir, "runner/runner.mjs"), bundle);
     for (const name of [...RUNTIME_SCRIPTS, ...BUILD_SCRIPTS]) await cp(join(sandboxDir, name), join(dir, name));
     const chunks: Buffer[] = [];
-    for await (const chunk of createTar({ cwd: dir, portable: true }, await readdir(dir))) chunks.push(chunk);
+    for await (const chunk of createTar({ cwd: dir, portable: true, gzip: true }, await readdir(dir))) chunks.push(chunk);
     return Buffer.concat(chunks);
   } finally {
     await rm(dir, { recursive: true, force: true });

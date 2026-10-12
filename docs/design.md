@@ -38,7 +38,7 @@ For a walkthrough of how the code uses the Sandbox API, see [sandboxes.md](sandb
 
 The cron runs every hour whether or not the repositories changed. This is simpler than webhook-driven builds and avoids the failure modes of webhook delivery (missed events, duplicate events, webhook secret rotation). An hourly cadence is frequent enough that investigations see commits within an hour of landing. It also keeps snapshots from expiring (Render's snapshot retention is time-based), so the bot stays available without monitoring snapshot age.
 
-Building unconditionally means some builds are redundant (the same commits, the same snapshot). This is inexpensive: a build takes about 5 minutes and uses a starter-plan cron, and the two-snapshot retention window means only one redundant snapshot exists at any time.
+Building unconditionally means some builds are redundant (the same commits, the same snapshot). This is inexpensive: a build takes about 5 minutes and uses a standard-plan cron that only bills while it runs, and the two-snapshot retention window means only one redundant snapshot exists at any time.
 
 ## The security boundary
 
