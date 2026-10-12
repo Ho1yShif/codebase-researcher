@@ -155,7 +155,7 @@ const Env = z
   })
   .transform((e) => {
     const useLocalDev = !!e.RENDER_LOCAL_DEV_URL || e.RENDER_USE_LOCAL_DEV;
-    const defaultSlug = "code-investigator-workflow";
+    const defaultSlug = "codebase-researcher-workflow";
     const taskSlug = e.WORKFLOW_TASK_SLUG ?? `${e.WORKFLOW_SLUG ?? defaultSlug}/answer_question`;
     const slackCredentials = e.SLACK_SIGNING_SECRET && e.SLACK_BOT_TOKEN
       ? { signingSecret: e.SLACK_SIGNING_SECRET, botToken: e.SLACK_BOT_TOKEN }

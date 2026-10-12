@@ -349,7 +349,7 @@ export const BotConfig = z.object({
     escalation: z.string().min(1),
     supportTeam: z.string().min(1),
   }),
-  snapshotName: z.string().min(1).default("code-investigator-corpus"),
+  snapshotName: z.string().min(1).default("codebase-researcher-corpus"),
 });
 export type BotConfig = z.infer<typeof BotConfig>;
 

@@ -278,7 +278,7 @@ describe("loadEnv", () => {
 
   it("derives taskSlug from WORKFLOW_SLUG", () => {
     const env = loadEnv(base);
-    expect(env.taskSlug).toBe("code-investigator-workflow/answer_question");
+    expect(env.taskSlug).toBe("codebase-researcher-workflow/answer_question");
   });
 
   it("RENDER_USE_LOCAL_DEV=true is local dev", () => {

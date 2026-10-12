@@ -6,12 +6,12 @@
 # doesn't reliably prompt for sync: false values inside env groups, and an empty one crashes the API.
 
 projects:
-  - name: code-investigator
+  - name: codebase-researcher
     environments:
       - name: production
         services:
           - type: web
-            name: code-investigator-api
+            name: codebase-researcher-api
             runtime: node
             region: oregon
             # Paid instance: a free instance spins down and misses Slack's 3-second deadline.
@@ -37,11 +37,11 @@ projects:
               - key: WORKFLOW_SLUG
                 fromService:
                   type: workflow
-                  name: code-investigator-workflow
+                  name: codebase-researcher-workflow
                   property: slug
 
           - type: workflow
-            name: code-investigator-workflow
+            name: codebase-researcher-workflow
             runtime: node
             region: oregon
             buildCommand: pnpm install --frozen-lockfile
@@ -67,7 +67,7 @@ projects:
                 value: allow-list
 
           - type: cron
-            name: code-investigator-snapshots
+            name: codebase-researcher-snapshots
             runtime: node
             region: oregon
             # Bundling the runner needs more than starter's 512 MB; the build is killed without a log line.

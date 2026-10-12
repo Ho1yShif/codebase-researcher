@@ -1,10 +1,10 @@
 {
-  "name": "code-investigator",
+  "name": "codebase-researcher",
   "private": true,
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/render-examples/code-investigator.git"
+    "url": "https://github.com/render-examples/codebase-researcher.git"
   },
   "type": "module",
   "packageManager": "pnpm@11.9.0",

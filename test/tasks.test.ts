@@ -342,7 +342,7 @@ describe("defineConfig", () => {
 
   it("defaults the snapshot name and keeps the configured repos", () => {
     const c = defineConfig(raw, {});
-    expect(c.snapshotName).toBe("code-investigator-corpus");
+    expect(c.snapshotName).toBe("codebase-researcher-corpus");
     expect(c.repos).toEqual([{ repository: "acme/api" }]);
   });
 

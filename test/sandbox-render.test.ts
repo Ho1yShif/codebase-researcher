@@ -20,7 +20,7 @@ const GH_TOKEN = "ghp_renderProviderSecret000000000000";
 const MODEL_KEY = "sk-ant-api03-renderProviderSecret";
 const LAYOUT = { reposRoot: "/opt/triage/repos", scratchDir: "/opt/triage/scratch" };
 const SHA = "1".repeat(40);
-const NAME = "code-investigator-corpus";
+const NAME = "codebase-researcher-corpus";
 const profile = { name: "default", repos: [{ repository: "render-oss/cli" }, { repository: "acme/api", branch: "main" }] };
 const heads: RepoManifest["repos"] = [
   { repository: "render-oss/cli", branch: "main", commit: SHA, path: "render-oss/cli" },

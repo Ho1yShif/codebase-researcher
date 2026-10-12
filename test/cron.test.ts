@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { refreshSnapshot } from "../src/cron.ts";
 
-const SNAPSHOT_NAME = "code-investigator-corpus";
+const SNAPSHOT_NAME = "codebase-researcher-corpus";
 
 describe("refreshSnapshot", () => {
   it("reports the built snapshot", async () => {

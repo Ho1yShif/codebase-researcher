@@ -461,7 +461,7 @@ describe("fetchTranscript", () => {
   });
 
   it("strips named bot mentions (<@UBOT|botname>)", async () => {
-    const parent = slack.seed({ channel: CH, user: "UHUMAN", text: "<@UBOT|code-investigator> what's up?" });
+    const parent = slack.seed({ channel: CH, user: "UHUMAN", text: "<@UBOT|codebase-researcher> what's up?" });
     const transcript = await fetchTranscript(slack, CH, parent.ts);
     expect(transcript[0]!.text).toBe("what's up?");
   });

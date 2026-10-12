@@ -4,11 +4,11 @@
 
 The system has three services:
 
-**API** (`code-investigator-api`, web service) accepts questions over HTTP and optionally listens for Slack mentions. It starts a workflow run for each question and returns immediately, so Slack's 3-second acknowledgement deadline is met without background threads or queues.
+**API** (`codebase-researcher-api`, web service) accepts questions over HTTP and optionally listens for Slack mentions. It starts a workflow run for each question and returns immediately, so Slack's 3-second acknowledgement deadline is met without background threads or queues.
 
-**Workflow** (`code-investigator-workflow`, Render Workflow) defines one parent task (`answer_question`) and two subtasks (`investigate` and `deliver`). The parent task starts `investigate`, collects the result, and optionally starts `deliver` to POST the result to a callback URL.
+**Workflow** (`codebase-researcher-workflow`, Render Workflow) defines one parent task (`answer_question`) and two subtasks (`investigate` and `deliver`). The parent task starts `investigate`, collects the result, and optionally starts `deliver` to POST the result to a callback URL.
 
-**Cron** (`code-investigator-snapshots`, hourly) resolves the current default-branch HEAD for each configured repository, clones them into a builder Sandbox, locks the filesystem down, and takes a named snapshot. It then prunes older snapshots, keeping the newest two. The snapshot name is a stable string set in `config.ts`. Sandbox restore uses the same name, so the workflow always gets the latest available snapshot.
+**Cron** (`codebase-researcher-snapshots`, hourly) resolves the current default-branch HEAD for each configured repository, clones them into a builder Sandbox, locks the filesystem down, and takes a named snapshot. It then prunes older snapshots, keeping the newest two. The snapshot name is a stable string set in `config.ts`. Sandbox restore uses the same name, so the workflow always gets the latest available snapshot.
 
 ```mermaid
 flowchart LR
@@ -61,6 +61,6 @@ This is accepted as a residual risk for several reasons: the API key is spend-ca
 ## What is deliberately out of scope
 
 - **Web UI.** The API is the interface. A UI can be built on top of it.
-- **Stored history.** Workflow runs are the history. A separate service could archive them, but the investigator does not.
+- **Stored history.** Workflow runs are the history. A separate service could archive them, but the researcher does not.
 - **Write access.** The agent cannot modify repositories, open pull requests, or write to any external system. Its only output is the structured investigation result.
 - **Live-system inspection.** The agent reads checked-out source code, not running services, databases, or metrics. It answers "what does the code do," not "what is happening right now."
