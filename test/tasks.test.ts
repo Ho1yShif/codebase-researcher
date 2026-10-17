@@ -274,7 +274,14 @@ describe("investigate", () => {
     expect(result).toEqual({ kind: "failed", code: "no_snapshot" });
 
     const { reply } = await answerQuestion(h.deps, "t2", { transcript: TRANSCRIPT });
-    expect(reply.kind === "failure" && reply.reason).toContain("repository snapshot isn't ready yet");
+    expect(reply.kind === "failure" && reply.reason).toContain("no repository snapshot is available");
+  });
+
+  it("says the snapshot isn't ready when one exists but isn't available", async () => {
+    const h = harness();
+    h.sandboxes.noSnapshot = "notReady";
+    const result = await investigateTask(h.invDeps(), { transcript: [], trace_id: "t3" });
+    expect(result).toEqual({ kind: "failed", code: "snapshot_not_ready" });
   });
 
   it("throws for infra errors so the subtask retries", async () => {

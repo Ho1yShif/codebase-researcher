@@ -50,9 +50,18 @@ export type RunInvestigationResult = {
   invalidLines: number;
 };
 
-/** Thrown when no snapshot with the requested name is available (expired, pruned, or not yet built). */
+/**
+ * Thrown when no snapshot with the requested name is available: expired, pruned, or not yet built. `notReady`
+ * means one exists but isn't available: its capture is still running or failed.
+ */
 export class SnapshotUnavailableError extends Error {
   override name = "SnapshotUnavailableError";
+  readonly notReady: boolean;
+
+  constructor(message: string, options?: ErrorOptions & { notReady?: boolean }) {
+    super(message, options);
+    this.notReady = options?.notReady ?? false;
+  }
 }
 
 const STDERR_TAIL_CHARS = 4096;

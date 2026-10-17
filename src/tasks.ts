@@ -64,7 +64,7 @@ function addUsage(total: Usage | undefined, next: Usage): Usage {
   return sum;
 }
 
-export type FailureCode = RunnerErrorCode | "retries_exhausted" | "misconfigured" | "no_snapshot" | "invalid_question";
+export type FailureCode = RunnerErrorCode | "retries_exhausted" | "misconfigured" | "no_snapshot" | "snapshot_not_ready" | "invalid_question";
 
 const EXIT_TIMEOUT = 124; // coreutils `timeout`
 const EXIT_SIGKILL = 137;
@@ -114,8 +114,13 @@ export function failureReason(code: FailureCode, agentTimeoutMs: number): string
       return "the investigation kept failing on infrastructure errors";
     case "misconfigured":
       return "the investigation service is misconfigured (an operator needs to check the workflow's settings)";
+    case "snapshot_not_ready":
+      return "the repository snapshot isn't ready: a build is still running (about 5 minutes) or the last one failed; try again shortly";
     case "no_snapshot":
-      return "the repository snapshot isn't ready yet (the first build takes about 5 minutes); try again shortly";
+      return (
+        "no repository snapshot is available: the first build hasn't finished, or recent builds failed and the last " +
+        "snapshot expired. Try again in a few minutes; if this keeps happening, an operator should check the snapshot cron's logs"
+      );
     case "invalid_question":
       return `the question couldn't be read (at most ${TRANSCRIPT_MAX_MESSAGES} messages of up to ${MESSAGE_MAX_CHARS} characters each)`;
   }
@@ -293,7 +298,7 @@ export async function investigateTask(
   try {
     sandbox = await openSandbox(snapshotName);
   } catch (err) {
-    if (err instanceof SnapshotUnavailableError) return { kind: "failed", code: "no_snapshot" };
+    if (err instanceof SnapshotUnavailableError) return { kind: "failed", code: err.notReady ? "snapshot_not_ready" : "no_snapshot" };
     throw err;
   }
   log.info("sandbox ready", { sandbox_id: sandbox.id, ...sandbox.info });

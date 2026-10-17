@@ -142,7 +142,7 @@ export class FakeSandboxes {
   readonly closed: string[] = [];
   #scripts: Script[] = [];
   #next = 0;
-  noSnapshot = false;
+  noSnapshot: boolean | "notReady" = false;
 
   script(...scripts: Script[]): this {
     this.#scripts.push(...scripts);
@@ -150,7 +150,7 @@ export class FakeSandboxes {
   }
 
   readonly open: OpenSandbox = async () => {
-    if (this.noSnapshot) throw new SnapshotUnavailableError("no snapshot");
+    if (this.noSnapshot) throw new SnapshotUnavailableError("no snapshot", { notReady: this.noSnapshot === "notReady" });
     const id = `sbx-${++this.#next}`;
     return {
       id,

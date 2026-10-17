@@ -74,7 +74,7 @@ When prompted (and verify afterwards in the Dashboard; empty `sync: false` value
 
 ### 4. First snapshot
 
-Trigger `codebase-researcher-snapshots` once from the Dashboard, or wait up to an hour for the first scheduled run. The first build takes about 5 minutes. Questions return "the repository snapshot isn't ready yet" until it finishes.
+Trigger `codebase-researcher-snapshots` once from the Dashboard, or wait up to an hour for the first scheduled run. The first build takes about 5 minutes. Until it finishes, questions fail with "no repository snapshot is available" (or "isn't ready" while the snapshot is being captured).
 
 ## Using the API
 
@@ -438,6 +438,42 @@ The cron logs one `snapshot_refresh` JSON line per run. Alert on consecutive run
 Redeploy the affected service. For the cron, "Trigger Run" in the Dashboard picks up new values immediately; scheduled runs use the values from the last deploy.
 
 After changing `config.ts`, `prompt.md`, `src/runner/`, or anything under `sandbox-runtime/`, trigger the snapshot cron. These files are baked into the snapshot at build time and do not reach investigations until a new snapshot is recorded.
+
+## Troubleshooting
+
+Start with the logs of the service named in each case; every event below is a JSON line you can search for.
+
+**Every question fails with "the investigation kept failing on infrastructure errors".** Open `codebase-researcher-workflow`'s logs and find the error behind the retries:
+
+- `Render rejected networkPolicy allow-list`: your workspace doesn't accept allow-list egress. Set `SANDBOX_NETWORK_POLICY=allow-all` on the workflow service. This lets investigation sandboxes reach any host, so read [Security properties](#how-a-question-flows) with that in mind.
+- `RENDER_WORKSPACE_ID is required: the API key has access to multiple workspaces`: set `RENDER_WORKSPACE_ID` on the workflow service and the cron to the workspace's `tea-…` ID.
+- `verify.sh exited`: the restored sandbox failed verification. The message says which check failed. A snapshot built by an older version of this repository fails here; trigger the snapshot cron.
+
+**Questions return "the repository snapshot isn't ready" or "no repository snapshot is available".** Trigger `codebase-researcher-snapshots` and read its `snapshot_refresh` line. When `ok` is false, `error` names the step:
+
+- `git ls-remote <repo>` failures: the repository is private and `GITHUB_TOKEN` is missing or lacks access, or the name in `config.ts` is wrong.
+- A run that stops without a `snapshot_refresh` line: the cron ran out of memory. It needs the Standard plan.
+
+**The Slack bot never answers.** Check the API service's logs:
+
+- No `slack_enabled` line: `SLACK_SIGNING_SECRET` or `SLACK_BOT_TOKEN` is missing, or `slack_disabled` says `PUBLIC_URL` is.
+- `slack_no_channels` or `mention_ignored`: add the channel's ID to `ALLOWED_CHANNEL_IDS`.
+- Nothing at all when you mention the bot: the app's event subscription URL is wrong, the `app_mention` event isn't subscribed, or the bot isn't in the channel.
+- `eyes_failed`: the app is missing the `reactions:write` scope.
+- `task_start_failed`: the API couldn't start the workflow run; the error says why (usually `RENDER_API_KEY`).
+
+**The bot reacts but never replies.** Find the run in the workflow service. If it finished, its `deliver` subtask shows why the callback failed: a 401 from `/slack/deliver` means `SLACK_CALLBACK_KEY` changed while the question was running.
+
+## Operating limits
+
+These come from the platform and shape how far one deployment goes:
+
+- **Sandbox API rate limit:** 100 requests a minute per workspace, shared with everything else in it. Each investigation makes 15 to 20 requests, mostly while restoring and verifying its sandbox. Request spacing (`RENDER_API_MIN_INTERVAL_MS`) is per task run, not per workspace, so many questions arriving together can exceed the limit. The client retries 429s, which slows restores down; expect a handful of concurrent questions per workspace, not dozens.
+- **Sandbox size:** 2 CPU, 4 GB of RAM, and 10 GB of storage. The checkouts, tools, and runner must fit in 10 GB.
+- **Region:** Oregon only, during early access.
+- **Run retention:** Render keeps each workflow run's input and result for 30 days. After that, `GET /v1/questions/:id` returns 404. Until then, transcripts and callback secrets are visible to anyone with access to the workflow service in the Dashboard.
+- **Snapshot expiry:** snapshots use Render's default lifetime. The hourly cron keeps a fresh one available; if it fails long enough for the last snapshot to expire, questions fail until a build succeeds.
+- **Timeouts:** an investigation gets `AGENT_TIMEOUT_MS` (15 minutes by default). Each `investigate` attempt is allowed the agent timeout plus 10 minutes for restore and cleanup, and infrastructure failures are retried twice, so in the worst case a failing question takes about 75 minutes to report back.
 
 ## Measured numbers
 

@@ -3,7 +3,7 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { manifestDigest } from "../src/types.ts";
 import type { RepoManifest, RunnerEvent } from "../src/types.ts";
-import { AbortError, ClientError, RenderError, SandboxSnapshotNotFoundError } from "@renderinc/sdk";
+import { AbortError, ClientError, RenderError, SandboxSnapshotNotFoundError, SandboxSnapshotNotReadyError } from "@renderinc/sdk";
 import type { SandboxExecEvent } from "@renderinc/sdk/experimental";
 import { list as listTar } from "tar";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -435,9 +435,18 @@ describe("openRenderSandbox", () => {
   it("throws SnapshotUnavailableError when no snapshot with that name is available", async () => {
     fake.createError = (input) =>
       input?.snapshotName ? new SandboxSnapshotNotFoundError("snapshot not found", 404) : undefined;
-    await expect(openRenderSandbox(client(), "no-such-snap")).rejects.toBeInstanceOf(
-      SnapshotUnavailableError,
-    );
+    await expect(openRenderSandbox(client(), "no-such-snap")).rejects.toMatchObject({
+      name: "SnapshotUnavailableError",
+      notReady: false,
+    });
+  });
+
+  it("reports a snapshot that exists but isn't available as notReady", async () => {
+    fake.createError = (input) =>
+      input?.snapshotName ? new SandboxSnapshotNotReadyError("snapshot not ready", 409) : undefined;
+    const err = await openRenderSandbox(client(), NAME).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SnapshotUnavailableError);
+    expect(err).toMatchObject({ notReady: true });
   });
 
   it("terminates the sandbox when verify fails", async () => {

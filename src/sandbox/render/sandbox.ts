@@ -101,7 +101,10 @@ export async function openRenderSandbox(client: SandboxClient, snapshotName: str
     );
   } catch (err) {
     if (err instanceof SandboxSnapshotNotFoundError || err instanceof SandboxSnapshotNotReadyError) {
-      throw new SnapshotUnavailableError(`no available snapshot named ${JSON.stringify(snapshotName)}: ${err.message}`, { cause: err });
+      throw new SnapshotUnavailableError(`no available snapshot named ${JSON.stringify(snapshotName)}: ${err.message}`, {
+        cause: err,
+        notReady: err instanceof SandboxSnapshotNotReadyError,
+      });
     }
     if (policy.default === "allow-list" && err instanceof ClientError && [400, 422].includes(err.statusCode)) {
       throw new Error(
