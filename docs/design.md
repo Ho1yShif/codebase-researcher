@@ -26,7 +26,7 @@ flowchart LR
 
 The core abstraction is a question (a transcript, an optional callback, and optional metadata) answered asynchronously. Slack is one consumer, but the same API can serve any caller: a CLI, a web dashboard, a CI pipeline, or another bot. The Slack adapter translates between Slack's event model and the question API, but the investigation pipeline knows nothing about Slack.
 
-This separation means the investigation logic does not depend on Slack's SDK, rate limits, or message formatting. It also means the Slack adapter can be turned off entirely (by omitting its env vars) without changing any other code.
+This separation means the investigation logic does not depend on Slack's SDK, rate limits, or message formatting. It also means the Slack adapter can be turned off entirely (by omitting its env vars) without changing any other code. [channels.md](channels.md) describes how to add another channel the same way.
 
 Each question gets its own Sandbox. Reusing a Sandbox across questions would let one investigation's side effects (files in scratch, environment changes, leftover processes) influence the next. A fresh restore from an immutable snapshot guarantees that every question starts from the same known state. It also simplifies cleanup: the Sandbox is terminated in a `finally` block, and any failure to clean up is bounded by the provider-side timeout.
 

@@ -206,6 +206,10 @@ Set these env vars on the API service:
 
 The API service also needs `PUBLIC_URL` or `RENDER_EXTERNAL_URL` (Render sets the latter automatically) so it can construct the callback URL for `/slack/deliver`.
 
+### Other channels
+
+Slack is one adapter over the question API. To answer questions from Discord, Microsoft Teams, or anything else, follow [docs/channels.md](docs/channels.md): the four steps every adapter takes, where to run it, and a sketch of a Discord slash command.
+
 ## Configuration
 
 ### API service (`codebase-researcher-api`)
@@ -309,6 +313,7 @@ render.yaml               # Blueprint: one project, three services
 package.json              # scripts: start:api, start:workflow, refresh, typecheck, test
 docs/
   design.md               # architecture, the security boundary, residual risks
+  channels.md             # adding a channel beyond Slack, with a Discord sketch
   sandboxes.md            # walkthrough of the Sandbox integration: what is essential, hardening, or an SDK gap
 examples/
   hello-sandbox.ts        # minimal Sandbox round trip: create, wait, upload, exec, download, terminate
