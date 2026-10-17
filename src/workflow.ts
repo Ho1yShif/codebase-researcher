@@ -1,4 +1,4 @@
-import { providerApiKey, RunnerInput } from "./types.ts";
+import { present, providerApiKey, RunnerInput } from "./types.ts";
 import config from "../config.ts";
 import { configureSandboxes } from "./sandbox/index.ts";
 import { task, type TaskContext } from "@renderinc/sdk/workflows";
@@ -84,8 +84,6 @@ const Env = z
     };
   });
 export type Config = z.output<typeof Env>;
-
-const present = (env: NodeJS.ProcessEnv) => Object.fromEntries(Object.entries(env).filter(([, v]) => v));
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return Env.parse(present(env));

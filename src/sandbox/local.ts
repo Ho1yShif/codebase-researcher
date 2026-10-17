@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import config from "../../config.ts";
-import { errorMessage, type RepoManifest, type RepoProfile } from "../types.ts";
+import { errorMessage, present, type RepoManifest, type RepoProfile } from "../types.ts";
 import { writeRunnerBundle } from "./runner-bundle.ts";
 import {
   REPO_ROOT,
@@ -42,7 +42,7 @@ export function loadLocalConfig(env: NodeJS.ProcessEnv = process.env): LocalConf
       LOCAL_RUNNER_CMD: z.string().optional(),
       LOCAL_RUNNER_ARGS: z.string().optional(),
     })
-    .parse(env);
+    .parse(present(env));
   return {
     profile: { name: config.name, repos: config.repos },
     reposRoot: e.LOCAL_REPOS_ROOT,

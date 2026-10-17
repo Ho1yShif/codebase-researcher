@@ -3,7 +3,7 @@
 # there. No database.
 #
 # Every secret is declared on the service that uses it, not in an env group: the Blueprint form
-# doesn't reliably prompt for sync: false values inside env groups, and an empty one crashes the API.
+# doesn't reliably prompt for sync: false values inside env groups. A value left blank counts as unset.
 
 projects:
   - name: codebase-researcher

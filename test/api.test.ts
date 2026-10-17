@@ -310,4 +310,13 @@ describe("loadEnv", () => {
     expect(loadEnv(base).slackCredentials).toBeUndefined();
     expect(loadEnv({ ...base, SLACK_SIGNING_SECRET: "s" }).slackCredentials).toBeUndefined();
   });
+
+  it("treats blank values (sync: false vars left empty in the Dashboard) as unset", () => {
+    const blank = { SLACK_SIGNING_SECRET: "", SLACK_BOT_TOKEN: "", ALLOWED_CHANNEL_IDS: "", SLACK_CALLBACK_KEY: " ", PUBLIC_URL: "" };
+    const env = loadEnv({ ...base, ...blank, RENDER_USE_LOCAL_DEV: "" });
+    expect(env.slackCredentials).toBeUndefined();
+    expect(env.slackCallbackKey).toBeUndefined();
+    expect(env.useLocalDev).toBe(false);
+    expect(() => loadEnv({ ...base, RENDER_API_KEY: "" })).toThrow(/RENDER_API_KEY is required/);
+  });
 });

@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { configureSandboxes } from "../src/sandbox/index.ts";
 import { SnapshotUnavailableError } from "../src/sandbox/interface.ts";
 import { SandboxClient, type SandboxApi } from "../src/sandbox/render/client.ts";
-import { resolveWorkspaceId, type NetworkPolicy, type RenderConfig } from "../src/sandbox/render/config.ts";
+import { loadRenderConfig, resolveWorkspaceId, type NetworkPolicy, type RenderConfig } from "../src/sandbox/render/config.ts";
 import { openRenderSandbox, runInvestigation } from "../src/sandbox/render/sandbox.ts";
 import { buildSnapshot, parseLsRemote, pruneSnapshots } from "../src/sandbox/render/snapshot.ts";
 import { runnerInput } from "./helpers.ts";
@@ -515,6 +515,19 @@ describe("resolveWorkspaceId", () => {
     await expect(
       resolveWorkspaceId("rnd_key", fakeFetch([])),
     ).rejects.toThrow("RENDER_API_KEY has no workspaces");
+  });
+});
+
+describe("loadRenderConfig", () => {
+  it("treats blank values (sync: false vars left empty in the Dashboard) as unset", async () => {
+    const cfg = await loadRenderConfig(
+      { RENDER_API_KEY: "rnd_key", RENDER_WORKSPACE_ID: "", SANDBOX_NETWORK_POLICY: "", SANDBOX_ALLOWED_DOMAINS: "", SANDBOX_TIMEOUT_SECONDS: "" },
+      "api.anthropic.com",
+      fakeFetch([{ id: "tea-only", name: "Only", type: "team" }]),
+    );
+    expect(cfg.workspaceId).toBe("tea-only");
+    expect(cfg.networkPolicy).toEqual({ default: "allow-list", allowedDomains: ["api.anthropic.com"] });
+    expect(cfg.investigationTimeoutSeconds).toBe(1_800);
   });
 });
 

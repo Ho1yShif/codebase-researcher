@@ -1,6 +1,7 @@
 import {
   ApiTranscript,
   QuestionMetadata,
+  present,
   type Reply,
   type StartQuestion,
 } from "./types.ts";
@@ -184,7 +185,7 @@ const Env = z
 export type ApiConfig = z.output<typeof Env>;
 
 export function loadEnv(env: NodeJS.ProcessEnv = process.env): ApiConfig {
-  return Env.parse(env);
+  return Env.parse(present(env));
 }
 
 // ── Server (runs only when executed directly) ────────────────────────────
