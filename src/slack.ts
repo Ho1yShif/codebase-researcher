@@ -398,7 +398,12 @@ export type SlackDeps = {
   publicUrl: string;
   slack: Slack;
   log: (line: string) => void;
+  /** Receives the work started after a mention is acknowledged (defaults to fire-and-forget; tests await it). */
+  background?: (work: Promise<void>) => void;
 };
+
+/** Starting a run happens after Slack is acknowledged, so it isn't bound by Slack's 3-second deadline. */
+const START_TIMEOUT_MS = 10_000;
 
 // ── Slack adapter routes ────────────────────────────────────────────────
 
@@ -442,57 +447,53 @@ export function mountSlackRoutes(
       return c.text("ok", 200);
     }
 
-    // Add 👀 reaction
+    // Slack wants a 200 within 3 seconds and retries otherwise, so acknowledge now and start the question
+    // after. A retry (X-Slack-Retry-Num) is handled like the original: the run is keyed on the event id.
+    const retry = c.req.header("x-slack-retry-num");
+    if (retry) slackDeps.log(JSON.stringify({ event: "slack_retry", event_id: event.eventId, retry_num: Number(retry) }));
+    (slackDeps.background ?? ((work) => void work))(startMention(event));
+    return c.text("ok", 200);
+  });
+
+  /** Reacts, reads the thread, and starts the question; on failure, says so in the thread. Never throws. */
+  async function startMention(event: SlackMention): Promise<void> {
+    const threadTs = event.threadTs ?? event.ts;
     try {
       await react(slack, event.channel, event.ts, "eyes");
     } catch (err) {
       slackDeps.log(JSON.stringify({ event: "eyes_failed", error: errorMessage(err) }));
     }
 
-    // Read the thread into a transcript
-    const threadTs = event.threadTs ?? event.ts;
-    const transcript = await fetchTranscript(slack, event.channel, threadTs);
-    const apiTranscript = fitTranscript(transcript.map((m) => ({
-      text: m.text,
-      author: m.user_id ?? undefined,
-      is_agent: m.is_agent,
-    })));
-
-    // Compute per-event callback secret: HMAC-SHA256(SLACK_CALLBACK_KEY, event_id)
-    const callbackSecret = createHmac("sha256", slackDeps.callbackKey).update(event.eventId).digest("hex");
-
-    const metadata = {
-      channel: event.channel,
-      thread_ts: threadTs,
-      mention_ts: event.ts,
-      event_id: event.eventId,
-    };
-
     try {
+      const transcript = await fetchTranscript(slack, event.channel, threadTs);
+      const apiTranscript = fitTranscript(transcript.map((m) => ({
+        text: m.text,
+        author: m.user_id ?? undefined,
+        is_agent: m.is_agent,
+      })));
+
+      // Per-event callback secret: HMAC-SHA256(SLACK_CALLBACK_KEY, event_id)
+      const callbackSecret = createHmac("sha256", slackDeps.callbackKey).update(event.eventId).digest("hex");
       const run = await apiDeps.startQuestion(
         {
           transcript: apiTranscript,
-          callback: {
-            url: `${slackDeps.publicUrl}/slack/deliver`,
-            secret: callbackSecret,
-          },
-          metadata,
+          callback: { url: `${slackDeps.publicUrl}/slack/deliver`, secret: callbackSecret },
+          metadata: { channel: event.channel, thread_ts: threadTs, mention_ts: event.ts, event_id: event.eventId },
         },
-        { idempotencyKey: event.eventId, signal: AbortSignal.timeout(2500) },
+        { idempotencyKey: event.eventId, signal: AbortSignal.timeout(START_TIMEOUT_MS) },
       );
       apiDeps.log(JSON.stringify({ event: "task_started", channel: event.channel, event_id: event.eventId, run_id: run.id }));
-      return c.text("ok", 200);
     } catch (err) {
-      apiDeps.log(
-        JSON.stringify({
-          event: "task_start_failed",
-          event_id: event.eventId,
-          error: errorMessage(err),
-        }),
-      );
-      return c.text("internal error", 500);
+      apiDeps.log(JSON.stringify({ event: "task_start_failed", event_id: event.eventId, error: errorMessage(err) }));
+      const reply: Reply = { kind: "failure", traceId: event.eventId, reason: "the investigation service didn't accept the question" };
+      try {
+        await postReply(slack, { channel: event.channel, threadTs, traceId: event.eventId }, formatReply(reply));
+        await swapEyesForResult(slack, event.channel, event.ts, "failure");
+      } catch (replyErr) {
+        slackDeps.log(JSON.stringify({ event: "failure_reply_failed", event_id: event.eventId, error: errorMessage(replyErr) }));
+      }
     }
-  });
+  }
 
   app.post("/slack/deliver", async (c) => {
     const rawBody = await c.req.text();

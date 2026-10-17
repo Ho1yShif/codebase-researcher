@@ -511,6 +511,9 @@ function slackHarness() {
   const started: Array<{ input: unknown; key?: string }> = [];
   const logs: string[] = [];
   const slack = createFakeSlack();
+  const pending: Promise<void>[] = [];
+  /** Waits for the work each acknowledged mention started. */
+  const settle = () => Promise.all(pending);
 
   const startQuestion: StartQuestion = async (input, opts) => {
     started.push({ input, key: opts.idempotencyKey });
@@ -527,11 +530,12 @@ function slackHarness() {
     publicUrl: "http://localhost:3000",
     slack,
     log: (l) => logs.push(l),
+    background: (work) => void pending.push(work),
   };
 
   mountSlackRoutes(app, slackDeps, { startQuestion, log: (l) => logs.push(l) });
 
-  return { app, started, logs, slack, slackDeps };
+  return { app, started, logs, slack, slackDeps, settle };
 }
 
 function mentionBody(overrides: Record<string, unknown> = {}) {
@@ -564,12 +568,14 @@ describe("Slack /slack/events", () => {
     expect(await res.json()).toEqual({ challenge: "test-challenge-xyz" });
   });
 
-  it("starts a task for a valid mention", async () => {
-    const { app, started, slack } = slackHarness();
-    slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> hello" });
+  it("acknowledges a valid mention, then starts a task", async () => {
+    const { app, started, slack, settle } = slackHarness();
+    const parent = slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> hello" });
     const body = mentionBody();
     const res = await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
     expect(res.status).toBe(200);
+    await settle();
+    expect(parent.reactions).toEqual([{ name: "eyes", user: "UBOT" }]);
     expect(started).toHaveLength(1);
     expect(started[0]?.key).toBe("Ev123ABC");
     const input = started[0]!.input as { callback: { url: string }; metadata: Record<string, string> };
@@ -578,13 +584,14 @@ describe("Slack /slack/events", () => {
   });
 
   it("fits a long thread into the question limits", async () => {
-    const { app, started, slack } = slackHarness();
+    const { app, started, slack, settle } = slackHarness();
     const parent = slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> why does this fail?" });
     slack.seed({ channel: "C0SUPPORT", thread_ts: parent.ts, user: "U1", text: "log ".repeat(5000) });
     for (let i = 0; i < 250; i++) slack.seed({ channel: "C0SUPPORT", thread_ts: parent.ts, user: "U2", text: `reply ${i}` });
     const body = mentionBody();
     const res = await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
     expect(res.status).toBe(200);
+    await settle();
     const { transcript } = started[0]!.input as { transcript: ApiTranscript };
     expect(ApiTranscript.safeParse(transcript).success).toBe(true);
     expect(transcript[0]!.text).toBe("why does this fail?");
@@ -613,15 +620,31 @@ describe("Slack /slack/events", () => {
     expect(started).toEqual([]);
   });
 
-  it("returns 500 when startQuestion fails", async () => {
+  it("says so in the thread when the question can't be started", async () => {
     const h = slackHarness();
     const failStart: StartQuestion = async () => { throw new Error("boom"); };
     const app = new Hono();
     mountSlackRoutes(app, h.slackDeps, { startQuestion: failStart, log: () => {} });
-    h.slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> hello" });
+    const parent = h.slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> hello" });
     const body = mentionBody();
     const res = await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
+    await h.settle();
+    const replies = h.slack.messages.filter((m) => m.user === "UBOT");
+    expect(replies).toHaveLength(1);
+    expect(replies[0]!.text).toContain("didn't accept the question");
+    expect(parent.reactions).toEqual([{ name: "warning", user: "UBOT" }]);
+  });
+
+  it("handles a Slack retry like the original, keyed on the event id", async () => {
+    const { app, started, slack, settle, logs } = slackHarness();
+    slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> hello" });
+    const body = mentionBody();
+    await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
+    await app.request("/slack/events", { method: "POST", headers: { ...slackSign(body), "x-slack-retry-num": "1" }, body });
+    await settle();
+    expect(started.map((s) => s.key)).toEqual(["Ev123ABC", "Ev123ABC"]);
+    expect(logs.some((l) => l.includes('"slack_retry"'))).toBe(true);
   });
 });
 

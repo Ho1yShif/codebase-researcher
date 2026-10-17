@@ -4,7 +4,7 @@
 
 The system has three services:
 
-**API** (`codebase-researcher-api`, web service) accepts questions over HTTP and optionally listens for Slack mentions. It starts a workflow run for each question and returns immediately, so Slack's 3-second acknowledgement deadline is met without background threads or queues.
+**API** (`codebase-researcher-api`, web service) accepts questions over HTTP and optionally listens for Slack mentions. It starts a workflow run for each question and returns immediately. For Slack, it acknowledges the event first and then reads the thread and starts the run, so Slack's 3-second deadline is met no matter how long the thread or the Render API takes.
 
 **Workflow** (`codebase-researcher-workflow`, Render Workflow) defines one parent task (`answer_question`) and two subtasks (`investigate` and `deliver`). The parent task starts `investigate`, collects the result, and optionally starts `deliver` to POST the result to a callback URL.
 

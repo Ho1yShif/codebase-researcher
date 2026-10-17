@@ -410,7 +410,8 @@ Every service emits structured JSON logs. Key events by service:
 | Service | `event` | Key fields | Meaning |
 |---|---|---|---|
 | API | `task_started` | `run_id`, `channel`, `event_id` | A workflow run was started |
-| API | `task_start_failed` | `error` | Starting the workflow run from Slack failed |
+| API | `task_start_failed` | `event_id`, `error` | Starting the workflow run from Slack failed; the thread gets a failure reply |
+| API | `slack_retry` | `event_id`, `retry_num` | Slack redelivered an event; it starts no second run |
 | API | `request_failed` | `method`, `path`, `error` | An HTTP API request failed with a 500 |
 | API | `slack_enabled` | — | Slack adapter mounted |
 | Workflow | `turn_finished` | `trace_id`, `outcome`, `model`, `usage`, `cost_usd`, `duration_ms` | One question answered |
