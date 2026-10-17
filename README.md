@@ -8,7 +8,7 @@ The button deploys this repository as is, investigating its example corpus: thre
 
 Each question runs inside a fresh, isolated Sandbox restored from an hourly snapshot of your repositories. An AI coding agent reads the code with read-only tools, validates every citation against the checkout, and returns a structured answer: short answer, confidence level, observations, inferences, unknowns, file-and-line evidence, a suggested owner, and an escalation-ready question for engineering.
 
-**Learning Render Sandboxes?** Start with [`examples/hello-sandbox.ts`](examples/hello-sandbox.ts), a 70-line round trip through the Sandbox API, then read [docs/sandboxes.md](docs/sandboxes.md), which walks through how this project builds, restores, verifies, and secures its sandboxes. The reasoning behind the overall design is in [docs/design.md](docs/design.md).
+**Learning Render Sandboxes?** Start with [`examples/hello-sandbox.ts`](examples/hello-sandbox.ts), a short round trip through the Sandbox API, then read [docs/sandboxes.md](docs/sandboxes.md), which walks through how this project builds, restores, verifies, and secures its sandboxes. The reasoning behind the overall design is in [docs/design.md](docs/design.md).
 
 ## How a question flows
 

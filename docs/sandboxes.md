@@ -1,6 +1,6 @@
 # How this project uses Render Sandboxes
 
-This is a guided tour of the Sandbox integration: what each call is for, where it lives, and which parts you need in your own project. If you have never used the Sandbox API, run [`examples/hello-sandbox.ts`](../examples/hello-sandbox.ts) first. It does the whole round trip (create, wait, upload, exec, download, terminate) in about 70 lines, and everything below is built from the same calls.
+This is a guided tour of the Sandbox integration: what each call is for, where it lives, and which parts you need in your own project. If you have never used the Sandbox API, run [`examples/hello-sandbox.ts`](../examples/hello-sandbox.ts) first. It does the whole round trip (create, wait, upload, exec, download, terminate) in under 80 lines, and everything below is built from the same calls.
 
 Each section is labeled:
 
@@ -119,7 +119,7 @@ The point is to check the sandbox you actually got instead of trusting the steps
 | Sending network policies as `type` plus `rules` ([`wirePolicy`](../src/sandbox/render/sandbox.ts)) | The API replaced `default` plus `allowedDomains`; 1.2.0's types still describe the old shape, and the API ignores `allowedDomains` |
 | Uploading the stage archive as a `.tgz` file and extracting it in the sandbox | The upload endpoint rejects an uncompressed tar of the bundled runner, and doesn't accept the SDK's `application/gzip` type |
 
-`examples/hello-sandbox.ts` has the minimal versions of the last three; you can skip throttling and 429 retries in a script that makes a handful of calls.
+`examples/hello-sandbox.ts` has minimal versions of the wait, the 404 retry, `exec` collection, and the policy shape. It uploads one small text file, so it doesn't need the `.tgz` workaround, and you can skip throttling and 429 retries in a script that makes a handful of calls.
 
 ## 9. Develop without sandboxes
 
