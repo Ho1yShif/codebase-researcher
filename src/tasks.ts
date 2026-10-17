@@ -1,6 +1,9 @@
+import { z } from "zod";
 import {
   AnswerQuestionInput,
+  MESSAGE_MAX_CHARS,
   RUNNER_EXIT,
+  TRANSCRIPT_MAX_MESSAGES,
   RunnerInput,
   buildEvidenceUrl,
   toInternalTranscript,
@@ -61,7 +64,7 @@ function addUsage(total: Usage | undefined, next: Usage): Usage {
   return sum;
 }
 
-export type FailureCode = RunnerErrorCode | "retries_exhausted" | "misconfigured" | "no_snapshot";
+export type FailureCode = RunnerErrorCode | "retries_exhausted" | "misconfigured" | "no_snapshot" | "invalid_question";
 
 const EXIT_TIMEOUT = 124; // coreutils `timeout`
 const EXIT_SIGKILL = 137;
@@ -113,8 +116,13 @@ export function failureReason(code: FailureCode, agentTimeoutMs: number): string
       return "the investigation service is misconfigured (an operator needs to check the workflow's settings)";
     case "no_snapshot":
       return "the repository snapshot isn't ready yet (the first build takes about 5 minutes); try again shortly";
+    case "invalid_question":
+      return `the question couldn't be read (at most ${TRANSCRIPT_MAX_MESSAGES} messages of up to ${MESSAGE_MAX_CHARS} characters each)`;
   }
 }
+
+/** The parts of the input needed to deliver a reply, read on their own when the transcript is invalid. */
+const DeliveryInput = AnswerQuestionInput.pick({ callback: true, metadata: true });
 
 export function filterEvidence(
   result: InvestigationResult,
@@ -167,18 +175,24 @@ export async function answerQuestion(
   traceId: string,
   rawInput: unknown,
 ): Promise<AnswerQuestionResult> {
-  const input = AnswerQuestionInput.parse(rawInput);
   const { config, log } = deps;
   const started = Date.now();
 
-  const transcript = toInternalTranscript(input.transcript);
+  const parsed = AnswerQuestionInput.safeParse(rawInput);
+  // Without a reply, a caller waiting on its callback (a Slack thread) would wait forever.
+  const input: z.infer<typeof DeliveryInput> = parsed.success ? parsed.data : DeliveryInput.safeParse(rawInput).data ?? {};
 
   let investigateResult: InvestigateResult;
-  try {
-    investigateResult = await deps.runInvestigate({ transcript, trace_id: traceId });
-  } catch (err) {
-    log.error("investigation failed", { trace_id: traceId, err });
-    investigateResult = { kind: "failed", code: "retries_exhausted" };
+  if (!parsed.success) {
+    log.warn("invalid question", { event: "invalid_question", trace_id: traceId, error: z.prettifyError(parsed.error) });
+    investigateResult = { kind: "failed", code: "invalid_question" };
+  } else {
+    try {
+      investigateResult = await deps.runInvestigate({ transcript: toInternalTranscript(parsed.data.transcript), trace_id: traceId });
+    } catch (err) {
+      log.error("investigation failed", { trace_id: traceId, err });
+      investigateResult = { kind: "failed", code: "retries_exhausted" };
+    }
   }
 
   let reply: Reply;

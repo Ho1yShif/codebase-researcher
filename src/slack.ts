@@ -5,7 +5,15 @@ import type { KnownBlock, ContextBlock, SectionBlock } from "@slack/types";
 import type { Hono } from "hono";
 import { z } from "zod";
 import type { Evidence, FinalAnswer, NeedsClarification, Transcript } from "./types.ts";
-import { buildEvidenceUrl, errorMessage, type ApiTranscript, type Reply, type StartQuestion } from "./types.ts";
+import {
+  MESSAGE_MAX_CHARS,
+  TRANSCRIPT_MAX_MESSAGES,
+  buildEvidenceUrl,
+  errorMessage,
+  type ApiTranscript,
+  type Reply,
+  type StartQuestion,
+} from "./types.ts";
 import { safeEqual, verifyCallback } from "./callback.ts";
 import config from "../config.ts";
 
@@ -232,6 +240,30 @@ export async function fetchTranscript(slack: Slack, channel: string, threadTs: s
     }));
 }
 
+const omittedNote = (n: number) => `[${n} earlier ${n === 1 ? "message" : "messages"} in this thread omitted]`;
+const truncatedNote = (n: number) => `\n\n[truncated: ${n} more characters]`;
+
+function cutMessage(text: string): string {
+  const keep = MESSAGE_MAX_CHARS - truncatedNote(text.length).length;
+  const head = text.slice(0, keep).replace(/[\uD800-\uDBFF]$/, "");
+  return head + truncatedNote(text.length - head.length);
+}
+
+/**
+ * Fits a thread into the question API's limits instead of letting the run fail: keeps the opening message and
+ * the most recent ones, and cuts long messages (pasted logs), saying so in the text the agent reads.
+ */
+export function fitTranscript(messages: ApiTranscript): ApiTranscript {
+  let kept = messages;
+  if (messages.length > TRANSCRIPT_MAX_MESSAGES) {
+    const omitted = messages.length - TRANSCRIPT_MAX_MESSAGES;
+    const [first, ...rest] = messages;
+    const [next, ...recent] = rest.slice(omitted);
+    kept = [first!, { ...next!, text: `${omittedNote(omitted)}\n\n${next!.text}` }, ...recent];
+  }
+  return kept.map((m) => (m.text.length > MESSAGE_MAX_CHARS ? { ...m, text: cutMessage(m.text) } : m));
+}
+
 export type SlackMessage = { text: string; blocks: KnownBlock[] };
 
 export const REPLY_EVENT_TYPE = "researcher_reply";
@@ -420,11 +452,11 @@ export function mountSlackRoutes(
     // Read the thread into a transcript
     const threadTs = event.threadTs ?? event.ts;
     const transcript = await fetchTranscript(slack, event.channel, threadTs);
-    const apiTranscript: ApiTranscript = transcript.map((m) => ({
+    const apiTranscript = fitTranscript(transcript.map((m) => ({
       text: m.text,
       author: m.user_id ?? undefined,
       is_agent: m.is_agent,
-    }));
+    })));
 
     // Compute per-event callback secret: HMAC-SHA256(SLACK_CALLBACK_KEY, event_id)
     const callbackSecret = createHmac("sha256", slackDeps.callbackKey).update(event.eventId).digest("hex");

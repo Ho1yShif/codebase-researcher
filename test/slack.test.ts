@@ -1,8 +1,8 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { parseSlackEvent, verifySlackSignature, escapeMrkdwn, truncate, evidenceUrl, formatReply, react, unreact, swapEyesForResult, postReply, findPostedReply, REPLY_EVENT_TYPE, fetchTranscript, compareTs, slackTsToIso, mountSlackRoutes, type SlackDeps } from "../src/slack.ts";
+import { parseSlackEvent, verifySlackSignature, escapeMrkdwn, truncate, evidenceUrl, formatReply, react, unreact, swapEyesForResult, postReply, findPostedReply, REPLY_EVENT_TYPE, fetchTranscript, compareTs, slackTsToIso, mountSlackRoutes, fitTranscript, type SlackDeps } from "../src/slack.ts";
 import { signCallback } from "../src/callback.ts";
-import type { Reply, StartQuestion } from "../src/types.ts";
+import { ApiTranscript, type Reply, type StartQuestion } from "../src/types.ts";
 import { createHmac } from "node:crypto";
 import type { Evidence, FinalAnswer } from "../src/types.ts";
 import config from "../config.ts";
@@ -575,6 +575,28 @@ describe("Slack /slack/events", () => {
     const input = started[0]!.input as { callback: { url: string }; metadata: Record<string, string> };
     expect(input.callback.url).toBe("http://localhost:3000/slack/deliver");
     expect(input.metadata.event_id).toBe("Ev123ABC");
+  });
+
+  it("fits a long thread into the question limits", async () => {
+    const { app, started, slack } = slackHarness();
+    const parent = slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> why does this fail?" });
+    slack.seed({ channel: "C0SUPPORT", thread_ts: parent.ts, user: "U1", text: "log ".repeat(5000) });
+    for (let i = 0; i < 250; i++) slack.seed({ channel: "C0SUPPORT", thread_ts: parent.ts, user: "U2", text: `reply ${i}` });
+    const body = mentionBody();
+    const res = await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
+    expect(res.status).toBe(200);
+    const { transcript } = started[0]!.input as { transcript: ApiTranscript };
+    expect(ApiTranscript.safeParse(transcript).success).toBe(true);
+    expect(transcript[0]!.text).toBe("why does this fail?");
+    expect(transcript[1]!.text).toBe("[52 earlier messages in this thread omitted]\n\nreply 51");
+    expect(transcript.at(-1)!.text).toBe("reply 249");
+  });
+
+  it("cuts a message over the length limit and says how much was cut", () => {
+    const [cut] = fitTranscript([{ text: "a".repeat(20_000) }]);
+    expect(cut!.text.length).toBeLessThanOrEqual(8000);
+    const omitted = Number(/\[truncated: (\d+) more characters\]$/.exec(cut!.text)?.[1]);
+    expect(cut!.text.indexOf("\n\n[truncated") + omitted).toBe(20_000);
   });
 
   it("ignores mentions from disallowed channels", async () => {

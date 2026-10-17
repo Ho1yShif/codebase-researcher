@@ -179,6 +179,28 @@ describe("answerQuestion", () => {
     expect(result.outcome).toBe("answer");
     expect(h.logs.some((l) => l.event === "deliver_failed")).toBe(true);
   });
+
+  it("delivers a failure reply for a transcript over the limits instead of throwing", async () => {
+    const h = harness();
+    const result = await answerQuestion(h.deps, "trace-long", {
+      transcript: [{ text: "x".repeat(8001) }],
+      callback: { url: "https://example.com/hook", secret: "c".repeat(32) },
+      metadata: { channel: "C1" },
+    });
+
+    expect(result.reply).toMatchObject({ kind: "failure", reason: expect.stringContaining("couldn't be read") });
+    expect(h.sandboxes.runs).toHaveLength(0);
+    expect(h.deliveries).toHaveLength(1);
+    expect(JSON.parse(h.deliveries[0]!.body)).toMatchObject({ reply: { kind: "failure" }, metadata: { channel: "C1" } });
+    expect(h.logs.some((l) => l.event === "invalid_question")).toBe(true);
+  });
+
+  it("returns a failure reply for invalid input without a callback", async () => {
+    const h = harness();
+    const result = await answerQuestion(h.deps, "trace-bad", { transcript: [] });
+    expect(result.reply.kind).toBe("failure");
+    expect(h.deliveries).toHaveLength(0);
+  });
 });
 
 describe("deliverCallback", () => {

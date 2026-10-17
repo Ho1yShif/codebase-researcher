@@ -268,14 +268,17 @@ export const RUNNER_EXIT = {
 
 // ── API transcript (the public shape accepted by POST /v1/questions) ────
 
+export const MESSAGE_MAX_CHARS = 8000;
+export const TRANSCRIPT_MAX_MESSAGES = 200;
+
 export const ApiTranscriptMessage = z.object({
-  text: z.string().max(8000),
+  text: z.string().max(MESSAGE_MAX_CHARS),
   author: z.string().optional(),
   is_agent: z.boolean().optional(),
 });
 export type ApiTranscriptMessage = z.infer<typeof ApiTranscriptMessage>;
 
-export const ApiTranscript = z.array(ApiTranscriptMessage).min(1).max(200);
+export const ApiTranscript = z.array(ApiTranscriptMessage).min(1).max(TRANSCRIPT_MAX_MESSAGES);
 export type ApiTranscript = z.infer<typeof ApiTranscript>;
 
 /** Convert the public transcript shape to the internal one the runner expects. */

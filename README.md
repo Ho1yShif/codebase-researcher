@@ -183,7 +183,7 @@ Note: callback secrets travel in workflow task input, which is visible in the Re
 
 The Slack integration is optional. It activates when both `SLACK_SIGNING_SECRET` and `SLACK_BOT_TOKEN` are set on the API service.
 
-When active: mention the bot in an allowed channel, it reacts with eyes, reads the full thread, starts an investigation with a per-event callback to `/slack/deliver`, posts the Block Kit reply, and swaps eyes for white_check_mark (answer or clarification) or warning (failure). Follow-ups work by mentioning the bot again in the same thread; the workflow re-reads the whole thread transcript.
+When active: mention the bot in an allowed channel, it reacts with eyes, reads the full thread, starts an investigation with a per-event callback to `/slack/deliver`, posts the Block Kit reply, and swaps eyes for white_check_mark (answer or clarification) or warning (failure). Follow-ups work by mentioning the bot again in the same thread; the workflow re-reads the whole thread transcript. Threads that exceed the API's limits are trimmed rather than rejected: the bot keeps the opening message and the most recent ones (200 in all), cuts any message over 8,000 characters, and tells the agent what it left out.
 
 ### Slack app setup
 
