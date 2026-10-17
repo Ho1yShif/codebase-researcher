@@ -8,7 +8,7 @@ const manifest: RepoManifest = {
   profile: "test",
   created_at: new Date().toISOString(),
   repos: [
-    { repository: "acme/api", branch: "main", commit: sha, path: "/opt/triage/repos/acme/api" },
+    { repository: "acme/api", branch: "main", commit: sha, path: "/opt/researcher/repos/acme/api" },
   ],
 };
 

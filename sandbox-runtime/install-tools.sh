@@ -5,8 +5,8 @@
 set -euo pipefail
 
 app=$1
-node_version=${TRIAGE_NODE_VERSION:-v24.14.1}
-rg_version=${TRIAGE_RG_VERSION:-14.1.1}
+node_version=${RESEARCHER_NODE_VERSION:-v24.14.1}
+rg_version=${RESEARCHER_RG_VERSION:-14.1.1}
 log() { printf 'install-tools: %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 node_ok() { have node && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; }

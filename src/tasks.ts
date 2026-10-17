@@ -236,6 +236,8 @@ export async function answerQuestion(
     trace_id: traceId,
     outcome,
     model: investigateResult.kind === "result" ? investigateResult.model : undefined,
+    prompt_version: investigateResult.kind === "result" ? investigateResult.prompt_version : undefined,
+    repos: investigateResult.kind === "result" ? investigateResult.repos : undefined,
     usage: investigateResult.kind === "result" ? investigateResult.usage : undefined,
     cost_usd: investigateResult.kind === "result" ? investigateResult.usage?.cost_usd : undefined,
     duration_ms: durationMs,

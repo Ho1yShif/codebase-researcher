@@ -14,7 +14,7 @@ let open: OpenSandbox;
 let commits: Record<string, string>;
 
 beforeAll(async () => {
-  root = await mkdtemp(join(tmpdir(), "triage-local-sandbox-"));
+  root = await mkdtemp(join(tmpdir(), "researcher-local-sandbox-"));
   commits = {
     "acme/widget": (await makeRepo(join(root, "repos"), "acme/widget")).commit,
     "acme/gadget": (await makeRepo(join(root, "repos"), "acme/gadget")).commit,
@@ -59,7 +59,7 @@ describe("localSandboxes", () => {
   it("returns events and delivers the key only through a file the runner deletes", async () => {
     const sbx = await open("ignored");
     const key = "sk-ant-local-test-key";
-    process.env.TRIAGE_TEST_ECHO_KEY = key;
+    process.env.RESEARCHER_TEST_ECHO_KEY = key;
     let events: RunnerEvent[];
     try {
       const res = await sbx.run({ input: runnerInput(sbx), modelApiKey: key, timeoutMs: 10_000 });
@@ -67,7 +67,7 @@ describe("localSandboxes", () => {
       expect(res.stderrTail).toContain("fake runner diagnostics");
       events = res.events;
     } finally {
-      delete process.env.TRIAGE_TEST_ECHO_KEY;
+      delete process.env.RESEARCHER_TEST_ECHO_KEY;
     }
     expect(events.map((e) => e.type)).toEqual(["started", "assistant_text", "result"]);
     const report = runnerReport(events);

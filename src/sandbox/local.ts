@@ -115,7 +115,7 @@ async function checkout(reposRoot: string, { repository, branch, url, browse }: 
 
 async function runLocal(runnerCmd: string, scratchDir: string, opts: RunInvestigationOptions): Promise<RunInvestigationResult> {
   await mkdir(scratchDir, { recursive: true });
-  const runDir = await mkdtemp(join(tmpdir(), "triage-run-"));
+  const runDir = await mkdtemp(join(tmpdir(), "researcher-run-"));
   try {
     const args: string[] = [];
     if (opts.modelApiKey) {

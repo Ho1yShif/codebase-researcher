@@ -18,7 +18,7 @@ import type { NetworkPolicy } from "./config.ts";
 // ── Sandbox layout and verification ─────────────────────────────────────
 
 /** Fixed paths inside every sandbox. The snapshot build creates them; restored sandboxes find them in place. */
-export const SANDBOX_ROOT = "/opt/triage";
+export const SANDBOX_ROOT = "/opt/researcher";
 export const SANDBOX_APP = `${SANDBOX_ROOT}/app`;
 export const SANDBOX_REPOS = `${SANDBOX_ROOT}/repos`;
 export const SANDBOX_SCRATCH = `${SANDBOX_ROOT}/scratch`;

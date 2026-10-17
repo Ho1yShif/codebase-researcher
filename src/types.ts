@@ -118,27 +118,19 @@ export const RepoManifest = z.object({
 });
 export type RepoManifest = z.infer<typeof RepoManifest>;
 
+/** One configured repository: where to clone it from and how to link to it. */
+const RepoSource = z.object({
+  repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
+  branch: z.string().min(1).optional(),
+  url: CloneUrl.optional(),
+  browse: Browse.optional(),
+});
+
 export const RepoProfile = z.object({
   name: z.string().min(1),
-  repos: z
-    .array(
-      z.object({
-        repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
-        branch: z.string().min(1).optional(),
-        url: CloneUrl.optional(),
-        browse: Browse.optional(),
-      }),
-    )
-    .min(1),
+  repos: z.array(RepoSource).min(1),
 });
 export type RepoProfile = z.infer<typeof RepoProfile>;
-
-export function manifestDigest(manifest: RepoManifest): string {
-  return manifest.repos
-    .map((r) => `${r.repository}@${r.commit}`)
-    .sort()
-    .join(",");
-}
 
 // ── Provider key map ────────────────────────────────────────────────────────
 
@@ -336,16 +328,7 @@ export const DEFAULT_CREDENTIALS: HostCredentials = {
 
 export const BotConfig = z.object({
   name: z.string().min(1),
-  repos: z
-    .array(
-      z.object({
-        repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
-        branch: z.string().min(1).optional(),
-        url: CloneUrl.optional(),
-        browse: Browse.optional(),
-      }),
-    )
-    .min(1),
+  repos: RepoProfile.shape.repos,
   gitCredentials: HostCredentials.optional().default(DEFAULT_CREDENTIALS),
   labels: z.object({
     owner: z.string().min(1),

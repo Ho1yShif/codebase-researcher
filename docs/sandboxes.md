@@ -87,7 +87,7 @@ The point is to check the sandbox you actually got instead of trusting the steps
 
 **Essential.** Git tokens exist only during the builder's clone step:
 
-- They are uploaded as files (`/tmp/triage-stage/creds/<host>`), never put in a command, a URL, or an environment variable. Commands and environment variables show up in process listings, and URLs end up in `.git/config`.
+- They are uploaded as files (`/tmp/researcher-stage/creds/<host>`), never put in a command, a URL, or an environment variable. Commands and environment variables show up in process listings, and URLs end up in `.git/config`.
 - Git reads them through [`git-credential-staged.sh`](../sandbox-runtime/build/git-credential-staged.sh).
 - [`scrub-credentials.sh`](../sandbox-runtime/build/scrub-credentials.sh) then fails the build if any token value appears in a git config, a credential store, or a repository's `.git`, and deletes the files. Both scripts live in a staging folder that is removed before the snapshot.
 

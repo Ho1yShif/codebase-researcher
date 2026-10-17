@@ -93,7 +93,7 @@ curl -X POST https://codebase-researcher-api.onrender.com/v1/questions \
 Response (`202`):
 
 ```json
-{"id": "tskr-abc123def456.Kx9mZ7..."}
+{"id": "trn-abc123def456.Kx9mZ7..."}
 ```
 
 The request body accepts:
@@ -107,26 +107,26 @@ An `Idempotency-Key` header (optional) prevents duplicate workflow runs for the 
 ### Poll for the result
 
 ```bash
-curl https://codebase-researcher-api.onrender.com/v1/questions/tskr-abc123def456.Kx9mZ7... \
+curl https://codebase-researcher-api.onrender.com/v1/questions/trn-abc123def456.Kx9mZ7... \
   -H "Authorization: Bearer $API_TOKEN"
 ```
 
 While running:
 
 ```json
-{"id": "tskr-abc123def456.Kx9mZ7...", "status": "running"}
+{"id": "trn-abc123def456.Kx9mZ7...", "status": "running"}
 ```
 
 When completed:
 
 ```json
 {
-  "id": "tskr-abc123def456.Kx9mZ7...",
+  "id": "trn-abc123def456.Kx9mZ7...",
   "status": "completed",
-  "trace_id": "tskr-abc123def456",
+  "trace_id": "trn-abc123def456",
   "reply": {
     "kind": "answer",
-    "traceId": "tskr-abc123def456",
+    "traceId": "trn-abc123def456",
     "result": {
       "status": "final_answer",
       "answer": "...",
@@ -407,6 +407,10 @@ pnpm typecheck
 pnpm test
 ```
 
+To also run a live smoke test of the runner against a real model, set `LIVE_MODEL_PROVIDER` and that provider's key var (for example `ANTHROPIC_API_KEY`) before `pnpm test`.
+
+Every variable the services read is listed in `.env.example`. Nothing loads it automatically: copy it to `.env` and pass it to a script with `pnpm exec tsx --env-file=.env <script>`.
+
 ## Operating it
 
 ### Log events
@@ -422,7 +426,7 @@ Every service emits structured JSON logs. Key events by service:
 | API | `slack_enabled` | — | Slack adapter mounted |
 | API | `slack_no_channels` | `message` | Slack is on but `ALLOWED_CHANNEL_IDS` is empty, so every mention is ignored |
 | API | `mention_ignored` | `reason`, `channel` | A mention came from a channel that isn't in `ALLOWED_CHANNEL_IDS` |
-| Workflow | `turn_finished` | `trace_id`, `outcome`, `model`, `usage`, `cost_usd`, `duration_ms` | One question answered |
+| Workflow | `turn_finished` | `trace_id`, `outcome`, `model`, `prompt_version`, `repos`, `usage`, `cost_usd`, `duration_ms` | One question answered; `repos` lists the commit of each repository it read |
 | Workflow | `workflow_misconfigured` | reason | Configuration error prevented the investigation |
 | Cron | `snapshot_refresh` | `ok`, `snapshot_id`, `snapshot_name`, `repos`, `duration_ms`, `error` | Hourly build completed or failed |
 

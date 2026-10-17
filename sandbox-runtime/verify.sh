@@ -21,8 +21,8 @@ done
 
 # ── Tools ─────────────────────────────────────────────────────────────────
 
-for tool in git rg timeout; do PATH="$TRIAGE_PATH" command -v "$tool" >/dev/null || fail "missing $tool"; done
-node_version=$("$TRIAGE_NODE" -p 'process.versions.node') || fail "node does not run"
+for tool in git rg timeout; do PATH="$RESEARCHER_PATH" command -v "$tool" >/dev/null || fail "missing $tool"; done
+node_version=$("$RESEARCHER_NODE" -p 'process.versions.node') || fail "node does not run"
 [ "${node_version%%.*}" -ge 22 ] || fail "node $node_version is older than 22"
 
 # ── Credential hygiene ────────────────────────────────────────────────────
@@ -33,8 +33,8 @@ pattern='^(credential\.|url\..*\.insteadof|http\..*\.extraheader)'
 for scope in --system --global; do
   if git config "$scope" --get-regexp "$pattern" >/dev/null 2>&1; then fail "credential settings in git $scope config"; fi
 done
-repos=$(find "$TRIAGE_REPOS_ROOT" -mindepth 3 -maxdepth 3 -name .git -type d -exec dirname {} \;)
-[ -n "$repos" ] || fail "no repos under $TRIAGE_REPOS_ROOT"
+repos=$(find "$RESEARCHER_REPOS_ROOT" -mindepth 3 -maxdepth 3 -name .git -type d -exec dirname {} \;)
+[ -n "$repos" ] || fail "no repos under $RESEARCHER_REPOS_ROOT"
 while IFS= read -r r; do
   if git -c safe.directory='*' -C "$r" config --local --get-regexp "$pattern" >/dev/null 2>&1; then fail "$r: credential settings in .git/config"; fi
   url=$(git -c safe.directory='*' -C "$r" config --local --get remote.origin.url || true)
@@ -43,7 +43,7 @@ done <<<"$repos"
 
 # ── Manifest and repo integrity ──────────────────────────────────────────
 
-entries=$("$TRIAGE_NODE" -e '
+entries=$("$RESEARCHER_NODE" -e '
 const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
 for (const r of m.repos) console.log([r.commit, r.path, r.repository].join("\t"));
 ' "$app/manifest.json") || fail "cannot read manifest"
@@ -58,23 +58,23 @@ done <<<"$entries"
 
 # ── Runner self-test ─────────────────────────────────────────────────────
 
-self_test=$(as_runner "$TRIAGE_RUNNER_NODE" "$app/runner/runner.mjs" --self-test) || fail "runner self-test failed"
+self_test=$(as_runner "$RESEARCHER_RUNNER_NODE" "$app/runner/runner.mjs" --self-test) || fail "runner self-test failed"
 
 # ── Non-dumpable check ───────────────────────────────────────────────────
 # An execute-only runner node keeps its memory (the model key) from same-uid tool subprocesses via /proc.
 
 non_dumpable=false
-if [ "$(id -u)" = 0 ] && [ "$TRIAGE_RUN_AS" != root ]; then
-  pidfile="$TRIAGE_SCRATCH_DIR/.triage-dumpable-probe.pid"
+if [ "$(id -u)" = 0 ] && [ "$RESEARCHER_RUN_AS" != root ]; then
+  pidfile="$RESEARCHER_SCRATCH_DIR/.researcher-dumpable-probe.pid"
   rm -f "$pidfile"
-  as_runner "$TRIAGE_RUNNER_NODE" -e 'require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000)' "$pidfile" &
+  as_runner "$RESEARCHER_RUNNER_NODE" -e 'require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000)' "$pidfile" &
   launcher=$!
   for _ in $(seq 1 100); do [ -s "$pidfile" ] && break; sleep 0.2; done
-  pid=$(cat "$pidfile" 2>/dev/null) || fail "$TRIAGE_RUNNER_NODE did not start"
+  pid=$(cat "$pidfile" 2>/dev/null) || fail "$RESEARCHER_RUNNER_NODE did not start"
   stop_probe() { kill "$pid" 2>/dev/null || true; wait "$launcher" 2>/dev/null || true; }
   if err=$(as_runner cat "/proc/$pid/maps" 2>&1 >/dev/null); then
     stop_probe
-    fail "runner is dumpable: $TRIAGE_RUN_AS can read /proc/$pid/maps of $TRIAGE_RUNNER_NODE"
+    fail "runner is dumpable: $RESEARCHER_RUN_AS can read /proc/$pid/maps of $RESEARCHER_RUNNER_NODE"
   fi
   stop_probe
   case "$err" in *"Permission denied"*) non_dumpable=true ;; *) fail "dumpability probe inconclusive: $err" ;; esac
@@ -85,29 +85,29 @@ fi
 dns_resolves=false
 if timeout 10 "$app/as-runner.sh" getent hosts example.com >/dev/null 2>&1; then dns_resolves=true; fi
 
-repo=$(find "$TRIAGE_REPOS_ROOT" -mindepth 2 -maxdepth 2 -type d | head -n 1)
-[ -n "$repo" ] || fail "no repos under $TRIAGE_REPOS_ROOT"
-if as_runner touch "$repo/.triage-write-probe" 2>/dev/null; then
-  rm -f "$repo/.triage-write-probe"
-  fail "$repo is writable by $TRIAGE_RUN_AS"
+repo=$(find "$RESEARCHER_REPOS_ROOT" -mindepth 2 -maxdepth 2 -type d | head -n 1)
+[ -n "$repo" ] || fail "no repos under $RESEARCHER_REPOS_ROOT"
+if as_runner touch "$repo/.researcher-write-probe" 2>/dev/null; then
+  rm -f "$repo/.researcher-write-probe"
+  fail "$repo is writable by $RESEARCHER_RUN_AS"
 fi
-as_runner touch "$TRIAGE_SCRATCH_DIR/.triage-write-probe" || fail "scratch is not writable by $TRIAGE_RUN_AS"
+as_runner touch "$RESEARCHER_SCRATCH_DIR/.researcher-write-probe" || fail "scratch is not writable by $RESEARCHER_RUN_AS"
 
 # ── Egress probes ────────────────────────────────────────────────────────
 
 probe='fetch(process.argv[1], { redirect: "manual", signal: AbortSignal.timeout(8000) }).then(() => process.exit(0), () => process.exit(1))'
-if [ -n "$deny_probe" ] && as_runner "$TRIAGE_NODE" -e "$probe" "$deny_probe"; then fail "egress to $deny_probe is allowed"; fi
-if [ -n "$allow_probe" ] && ! as_runner "$TRIAGE_NODE" -e "$probe" "$allow_probe"; then fail "egress to $allow_probe is blocked"; fi
+if [ -n "$deny_probe" ] && as_runner "$RESEARCHER_NODE" -e "$probe" "$deny_probe"; then fail "egress to $deny_probe is allowed"; fi
+if [ -n "$allow_probe" ] && ! as_runner "$RESEARCHER_NODE" -e "$probe" "$allow_probe"; then fail "egress to $allow_probe is blocked"; fi
 
 # ── Cleanup and report ───────────────────────────────────────────────────
 
-find "$TRIAGE_SCRATCH_DIR" -mindepth 1 -delete
+find "$RESEARCHER_SCRATCH_DIR" -mindepth 1 -delete
 
-"$TRIAGE_NODE" -e '
+"$RESEARCHER_NODE" -e '
 const [runAs, uid, drop, selfTest, nonDumpable, dnsResolves] = process.argv.slice(1);
 console.log(JSON.stringify({
   runAs, uid: Number(uid), drop, node: process.version,
   runnerNonDumpable: nonDumpable === "true", dnsResolves: dnsResolves === "true",
   selfTest: JSON.parse(selfTest.trim().split("\n").pop()),
 }));
-' "$TRIAGE_RUN_AS" "$(id -u)" "$TRIAGE_DROP" "$self_test" "$non_dumpable" "$dns_resolves"
+' "$RESEARCHER_RUN_AS" "$(id -u)" "$RESEARCHER_DROP" "$self_test" "$non_dumpable" "$dns_resolves"
