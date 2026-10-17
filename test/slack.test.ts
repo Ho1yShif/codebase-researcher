@@ -616,8 +616,8 @@ describe("Slack /slack/deliver", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-triage-timestamp": String(Math.floor(Date.now() / 1000)),
-        "x-triage-signature": "v1=badbadbad",
+        "x-researcher-timestamp": String(Math.floor(Date.now() / 1000)),
+        "x-researcher-signature": "v1=badbadbad",
       },
       body,
     });
@@ -648,8 +648,8 @@ describe("Slack /slack/deliver", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-triage-timestamp": String(timestamp),
-        "x-triage-signature": signature,
+        "x-researcher-timestamp": String(timestamp),
+        "x-researcher-signature": signature,
       },
       body,
     });
@@ -680,8 +680,8 @@ describe("Slack /slack/deliver", () => {
     const { signature, timestamp } = signCallback(secret, body);
     const headers = {
       "content-type": "application/json",
-      "x-triage-timestamp": String(timestamp),
-      "x-triage-signature": signature,
+      "x-researcher-timestamp": String(timestamp),
+      "x-researcher-signature": signature,
     };
 
     await app.request("/slack/deliver", { method: "POST", headers, body });

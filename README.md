@@ -159,8 +159,8 @@ Question IDs are signed: only IDs that this API issued can be read. Rotating `AP
 
 If you included a `callback`, the workflow POSTs the result to your URL with these headers:
 
-- `X-Triage-Timestamp`: Unix timestamp (seconds).
-- `X-Triage-Signature`: `v1=<hex HMAC-SHA256(secret, timestamp + "." + body)>`.
+- `X-Researcher-Timestamp`: Unix timestamp (seconds).
+- `X-Researcher-Signature`: `v1=<hex HMAC-SHA256(secret, timestamp + "." + body)>`.
 
 The body is JSON with `trace_id`, `reply`, and the caller's `metadata` (use metadata to correlate callbacks with your requests). The callback is retried up to 8 times with exponential backoff.
 

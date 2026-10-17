@@ -206,8 +206,8 @@ describe("deliverCallback", () => {
       });
 
       expect(received).toHaveLength(1);
-      expect(received[0]!.headers["x-triage-timestamp"]).toMatch(/^\d+$/);
-      expect(received[0]!.headers["x-triage-signature"]).toMatch(/^v1=[0-9a-f]{64}$/);
+      expect(received[0]!.headers["x-researcher-timestamp"]).toMatch(/^\d+$/);
+      expect(received[0]!.headers["x-researcher-signature"]).toMatch(/^v1=[0-9a-f]{64}$/);
       expect(received[0]!.headers["content-type"]).toBe("application/json");
     } finally {
       server.close();

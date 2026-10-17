@@ -234,7 +234,7 @@ export async function fetchTranscript(slack: Slack, channel: string, threadTs: s
 
 export type SlackMessage = { text: string; blocks: KnownBlock[] };
 
-export const REPLY_EVENT_TYPE = "triage_reply";
+export const REPLY_EVENT_TYPE = "researcher_reply";
 
 const ITEM_MAX = 1000;
 const MORE_RESERVE = 32;
@@ -485,8 +485,8 @@ export function mountSlackRoutes(
     if (
       !verifyCallback({
         secret: expectedSecret,
-        signature: c.req.header("x-triage-signature"),
-        timestamp: c.req.header("x-triage-timestamp"),
+        signature: c.req.header("x-researcher-signature"),
+        timestamp: c.req.header("x-researcher-timestamp"),
         body: rawBody,
       })
     ) {

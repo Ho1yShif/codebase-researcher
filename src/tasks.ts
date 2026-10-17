@@ -235,8 +235,8 @@ export async function deliverCallback(input: DeliverInput): Promise<void> {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Triage-Timestamp": String(timestamp),
-        "X-Triage-Signature": signature,
+        "X-Researcher-Timestamp": String(timestamp),
+        "X-Researcher-Signature": signature,
       },
       body: input.body,
       signal: controller.signal,
