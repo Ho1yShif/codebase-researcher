@@ -414,6 +414,8 @@ Every service emits structured JSON logs. Key events by service:
 | API | `slack_retry` | `event_id`, `retry_num` | Slack redelivered an event; it starts no second run |
 | API | `request_failed` | `method`, `path`, `error` | An HTTP API request failed with a 500 |
 | API | `slack_enabled` | — | Slack adapter mounted |
+| API | `slack_no_channels` | `message` | Slack is on but `ALLOWED_CHANNEL_IDS` is empty, so every mention is ignored |
+| API | `mention_ignored` | `reason`, `channel` | A mention came from a channel that isn't in `ALLOWED_CHANNEL_IDS` |
 | Workflow | `turn_finished` | `trace_id`, `outcome`, `model`, `usage`, `cost_usd`, `duration_ms` | One question answered |
 | Workflow | `workflow_misconfigured` | reason | Configuration error prevented the investigation |
 | Cron | `snapshot_refresh` | `ok`, `snapshot_id`, `snapshot_name`, `repos`, `duration_ms`, `error` | Hourly build completed or failed |

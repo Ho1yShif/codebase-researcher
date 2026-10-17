@@ -606,8 +606,8 @@ describe("Slack /slack/events", () => {
     expect(cut!.text.indexOf("\n\n[truncated") + omitted).toBe(20_000);
   });
 
-  it("ignores mentions from disallowed channels", async () => {
-    const { app, started } = slackHarness();
+  it("ignores mentions from disallowed channels, and logs why", async () => {
+    const { app, started, logs } = slackHarness();
     const body = JSON.stringify({
       type: "event_callback",
       team_id: "T1",
@@ -618,6 +618,15 @@ describe("Slack /slack/events", () => {
     const res = await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
     expect(res.status).toBe(200);
     expect(started).toEqual([]);
+    expect(logs.some((l) => l.includes('"mention_ignored"') && l.includes("C_OTHER"))).toBe(true);
+  });
+
+  it("warns at startup when no channel is allowed", () => {
+    const h = slackHarness();
+    const logs: string[] = [];
+    mountSlackRoutes(new Hono(), { ...h.slackDeps, allowedChannels: new Set(), log: (l) => logs.push(l) }, { startQuestion: async () => ({ id: "r" }), log: () => {} });
+    expect(logs.some((l) => l.includes('"slack_no_channels"'))).toBe(true);
+    expect(h.logs.some((l) => l.includes('"slack_no_channels"'))).toBe(false);
   });
 
   it("says so in the thread when the question can't be started", async () => {

@@ -413,6 +413,13 @@ export function mountSlackRoutes(
   apiDeps: { startQuestion: StartQuestion; log: (line: string) => void },
 ) {
   const { slack } = slackDeps;
+  if (slackDeps.allowedChannels !== "*" && slackDeps.allowedChannels.size === 0) {
+    slackDeps.log(JSON.stringify({
+      event: "slack_no_channels",
+      level: "warn",
+      message: "ALLOWED_CHANNEL_IDS is empty, so the bot ignores every mention; list channel IDs, or * for all",
+    }));
+  }
 
   app.post("/slack/events", async (c) => {
     const rawBody = await c.req.text();
@@ -444,6 +451,7 @@ export function mountSlackRoutes(
     if (event.kind === "ignored") return c.text("ok", 200);
 
     if (slackDeps.allowedChannels !== "*" && !slackDeps.allowedChannels.has(event.channel)) {
+      slackDeps.log(JSON.stringify({ event: "mention_ignored", reason: "channel_not_allowed", channel: event.channel }));
       return c.text("ok", 200);
     }
 
