@@ -23,9 +23,10 @@ Security properties of this design:
 
 - Every question gets its own Sandbox, restored from an immutable snapshot. No state carries between questions.
 - Repositories are root-owned and read-only inside the Sandbox. The runner process runs as an unprivileged user.
-- The model API key is delivered as a one-time file that the runner deletes on read. The runner binary is execute-only (non-dumpable), so the agent's tool subprocesses cannot read its memory or the key through `/proc`.
+- The model API key is delivered as a one-time file that the runner deletes on read. The runner binary is execute-only (non-dumpable), so the agent's tool subprocesses cannot read its memory or the key through `/proc`. Every restored sandbox proves this before it gets work, and a sandbox that can't is refused.
 - HTTP(S) egress is restricted to an allow-list containing only the model provider's API host (derived automatically from the model). DNS still resolves arbitrary names (see the design doc for the residual risk).
 - Git tokens exist only in the builder Sandbox during the clone phase. They are scrubbed and verified absent before the snapshot is taken. Per-question Sandboxes never see them.
+- Anyone who can ask the bot can read the configured repositories through it, so limit who can ask. The [design doc](docs/design.md#the-security-boundary) lists this and the other residual risks.
 
 ## Prerequisites
 

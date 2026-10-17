@@ -123,6 +123,8 @@ export async function openRenderSandbox(client: SandboxClient, snapshotName: str
     }
     await client.waitRunning(id);
     const info = await verifySandbox(client, id, { probes: policy, waitReady: true });
+    // verify.sh can only probe /proc as root; a sandbox where it couldn't check doesn't get the model key.
+    if (!info.runnerNonDumpable) throw new Error(`could not confirm the runner is non-dumpable in ${id}; refusing to run an investigation`);
     const manifest = RepoManifest.parse(JSON.parse(await client.download(id, `${SANDBOX_APP}/manifest.json`)));
     return {
       id,

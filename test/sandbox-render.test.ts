@@ -449,6 +449,15 @@ describe("openRenderSandbox", () => {
     expect(err).toMatchObject({ notReady: true });
   });
 
+  it("refuses a sandbox where verify.sh couldn't confirm the runner is non-dumpable", async () => {
+    fake.exec_ = (id, command) =>
+      command.includes("verify.sh")
+        ? [out(`${JSON.stringify({ ...JSON.parse(info()), runnerNonDumpable: false })}\n`), exit(0)]
+        : prepareExec(id, command);
+    await expect(openRenderSandbox(client(), NAME)).rejects.toThrow("could not confirm the runner is non-dumpable");
+    expect(fake.calls.filter((c) => c.op === "terminate")).toHaveLength(1);
+  });
+
   it("terminates the sandbox when verify fails", async () => {
     fake.exec_ = (id, command) =>
       command.includes("verify.sh") ? [out("verify: egress to https://example.com is allowed\n", "stderr"), exit(1)] : prepareExec(id, command);

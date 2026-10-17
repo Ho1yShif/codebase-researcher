@@ -58,6 +58,20 @@ The allow-list network policy blocks TCP/TLS connections to hosts not on the lis
 
 This is accepted as a residual risk for several reasons: the API key is spend-capped, the key is available only in memory (non-dumpable), and DNS exfiltration is low-bandwidth and noisy. A future mitigation could use a custom DNS resolver that blocks queries to non-allowlisted domains, but this is not implemented.
 
+### Known residual risk: anyone who can ask can read the code
+
+The bot answers with quoted, linked lines from every configured repository, and it will look at whatever a question points it at. Anyone in an allowed Slack channel, and anyone holding `API_TOKEN`, can therefore read any file in the corpus by asking for it. Treat access to the bot like read access to the repositories: list only channels in `ALLOWED_CHANNEL_IDS` whose members could read every repository, avoid `*` outside development, and rotate `API_TOKEN` if it leaks (rotation also invalidates outstanding question IDs).
+
+### Known residual risk: the model provider's host is shared
+
+The allow-list admits one host, the model provider's API, but that host serves all of the provider's customers. The read-only shell policy is a usability guard, not a boundary (see [`src/runner/tools.ts`](../src/runner/tools.ts)), so an agent steered by instructions planted in a repository or a question could send source code to that host under a different account's API key, for example with `node -e "fetch(...)"`. The egress policy can't tell one key from another.
+
+This is accepted because the provider already receives the code the agent reads as part of normal operation, the agent's tool environment holds no credentials to misuse, and the attack needs a key the attacker controls. Brokering the credential outside the sandbox, so requests can only go out under your account, would close it.
+
+### What verification guarantees
+
+[`verify.sh`](../sandbox-runtime/verify.sh) runs as root in Render sandboxes, where it checks that the runner is non-dumpable by trying to read the runner's `/proc/<pid>/maps` as the runner user. It can only make that check as root, so `openRenderSandbox` refuses any sandbox where the check didn't run and pass. Local sandboxes (`SANDBOX_PROVIDER=local`) provide no isolation at all; they exist for development and tests.
+
 ## What is deliberately out of scope
 
 - **Web UI.** The API is the interface. A UI can be built on top of it.
