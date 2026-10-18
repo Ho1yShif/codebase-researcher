@@ -18,7 +18,7 @@ import type { NetworkPolicy } from "./config.ts";
 // ── Sandbox layout and verification ─────────────────────────────────────
 
 /** Fixed paths inside every sandbox. The snapshot build creates them; restored sandboxes find them in place. */
-export const SANDBOX_ROOT = "/opt/triage";
+export const SANDBOX_ROOT = "/opt/researcher";
 export const SANDBOX_APP = `${SANDBOX_ROOT}/app`;
 export const SANDBOX_REPOS = `${SANDBOX_ROOT}/repos`;
 export const SANDBOX_SCRATCH = `${SANDBOX_ROOT}/scratch`;
@@ -101,7 +101,10 @@ export async function openRenderSandbox(client: SandboxClient, snapshotName: str
     );
   } catch (err) {
     if (err instanceof SandboxSnapshotNotFoundError || err instanceof SandboxSnapshotNotReadyError) {
-      throw new SnapshotUnavailableError(`no available snapshot named ${JSON.stringify(snapshotName)}: ${err.message}`, { cause: err });
+      throw new SnapshotUnavailableError(`no available snapshot named ${JSON.stringify(snapshotName)}: ${err.message}`, {
+        cause: err,
+        notReady: err instanceof SandboxSnapshotNotReadyError,
+      });
     }
     if (policy.default === "allow-list" && err instanceof ClientError && [400, 422].includes(err.statusCode)) {
       throw new Error(
@@ -120,6 +123,8 @@ export async function openRenderSandbox(client: SandboxClient, snapshotName: str
     }
     await client.waitRunning(id);
     const info = await verifySandbox(client, id, { probes: policy, waitReady: true });
+    // verify.sh can only probe /proc as root; a sandbox where it couldn't check doesn't get the model key.
+    if (!info.runnerNonDumpable) throw new Error(`could not confirm the runner is non-dumpable in ${id}; refusing to run an investigation`);
     const manifest = RepoManifest.parse(JSON.parse(await client.download(id, `${SANDBOX_APP}/manifest.json`)));
     return {
       id,

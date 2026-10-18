@@ -1,8 +1,8 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { parseSlackEvent, verifySlackSignature, escapeMrkdwn, truncate, evidenceUrl, formatReply, react, unreact, swapEyesForResult, postReply, findPostedReply, REPLY_EVENT_TYPE, fetchTranscript, compareTs, slackTsToIso, mountSlackRoutes, type SlackDeps } from "../src/slack.ts";
+import { parseSlackEvent, verifySlackSignature, escapeMrkdwn, truncate, evidenceUrl, formatReply, react, unreact, swapEyesForResult, postReply, findPostedReply, REPLY_EVENT_TYPE, fetchTranscript, compareTs, slackTsToIso, mountSlackRoutes, fitTranscript, type SlackDeps } from "../src/slack.ts";
 import { signCallback } from "../src/callback.ts";
-import type { Reply, StartQuestion } from "../src/types.ts";
+import { ApiTranscript, type Reply, type StartQuestion } from "../src/types.ts";
 import { createHmac } from "node:crypto";
 import type { Evidence, FinalAnswer } from "../src/types.ts";
 import config from "../config.ts";
@@ -511,6 +511,9 @@ function slackHarness() {
   const started: Array<{ input: unknown; key?: string }> = [];
   const logs: string[] = [];
   const slack = createFakeSlack();
+  const pending: Promise<void>[] = [];
+  /** Waits for the work each acknowledged mention started. */
+  const settle = () => Promise.all(pending);
 
   const startQuestion: StartQuestion = async (input, opts) => {
     started.push({ input, key: opts.idempotencyKey });
@@ -527,11 +530,12 @@ function slackHarness() {
     publicUrl: "http://localhost:3000",
     slack,
     log: (l) => logs.push(l),
+    background: (work) => void pending.push(work),
   };
 
   mountSlackRoutes(app, slackDeps, { startQuestion, log: (l) => logs.push(l) });
 
-  return { app, started, logs, slack, slackDeps };
+  return { app, started, logs, slack, slackDeps, settle };
 }
 
 function mentionBody(overrides: Record<string, unknown> = {}) {
@@ -564,12 +568,14 @@ describe("Slack /slack/events", () => {
     expect(await res.json()).toEqual({ challenge: "test-challenge-xyz" });
   });
 
-  it("starts a task for a valid mention", async () => {
-    const { app, started, slack } = slackHarness();
-    slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> hello" });
+  it("acknowledges a valid mention, then starts a task", async () => {
+    const { app, started, slack, settle } = slackHarness();
+    const parent = slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> hello" });
     const body = mentionBody();
     const res = await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
     expect(res.status).toBe(200);
+    await settle();
+    expect(parent.reactions).toEqual([{ name: "eyes", user: "UBOT" }]);
     expect(started).toHaveLength(1);
     expect(started[0]?.key).toBe("Ev123ABC");
     const input = started[0]!.input as { callback: { url: string }; metadata: Record<string, string> };
@@ -577,8 +583,31 @@ describe("Slack /slack/events", () => {
     expect(input.metadata.event_id).toBe("Ev123ABC");
   });
 
-  it("ignores mentions from disallowed channels", async () => {
-    const { app, started } = slackHarness();
+  it("fits a long thread into the question limits", async () => {
+    const { app, started, slack, settle } = slackHarness();
+    const parent = slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> why does this fail?" });
+    slack.seed({ channel: "C0SUPPORT", thread_ts: parent.ts, user: "U1", text: "log ".repeat(5000) });
+    for (let i = 0; i < 250; i++) slack.seed({ channel: "C0SUPPORT", thread_ts: parent.ts, user: "U2", text: `reply ${i}` });
+    const body = mentionBody();
+    const res = await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
+    expect(res.status).toBe(200);
+    await settle();
+    const { transcript } = started[0]!.input as { transcript: ApiTranscript };
+    expect(ApiTranscript.safeParse(transcript).success).toBe(true);
+    expect(transcript[0]!.text).toBe("why does this fail?");
+    expect(transcript[1]!.text).toBe("[52 earlier messages in this thread omitted]\n\nreply 51");
+    expect(transcript.at(-1)!.text).toBe("reply 249");
+  });
+
+  it("cuts a message over the length limit and says how much was cut", () => {
+    const [cut] = fitTranscript([{ text: "a".repeat(20_000) }]);
+    expect(cut!.text.length).toBeLessThanOrEqual(8000);
+    const omitted = Number(/\[truncated: (\d+) more characters\]$/.exec(cut!.text)?.[1]);
+    expect(cut!.text.indexOf("\n\n[truncated") + omitted).toBe(20_000);
+  });
+
+  it("ignores mentions from disallowed channels, and logs why", async () => {
+    const { app, started, logs } = slackHarness();
     const body = JSON.stringify({
       type: "event_callback",
       team_id: "T1",
@@ -589,17 +618,42 @@ describe("Slack /slack/events", () => {
     const res = await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
     expect(res.status).toBe(200);
     expect(started).toEqual([]);
+    expect(logs.some((l) => l.includes('"mention_ignored"') && l.includes("C_OTHER"))).toBe(true);
   });
 
-  it("returns 500 when startQuestion fails", async () => {
+  it("warns at startup when no channel is allowed", () => {
+    const h = slackHarness();
+    const logs: string[] = [];
+    mountSlackRoutes(new Hono(), { ...h.slackDeps, allowedChannels: new Set(), log: (l) => logs.push(l) }, { startQuestion: async () => ({ id: "r" }), log: () => {} });
+    expect(logs.some((l) => l.includes('"slack_no_channels"'))).toBe(true);
+    expect(h.logs.some((l) => l.includes('"slack_no_channels"'))).toBe(false);
+  });
+
+  it("says so in the thread when the question can't be started", async () => {
     const h = slackHarness();
     const failStart: StartQuestion = async () => { throw new Error("boom"); };
     const app = new Hono();
     mountSlackRoutes(app, h.slackDeps, { startQuestion: failStart, log: () => {} });
-    h.slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> hello" });
+    const parent = h.slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> hello" });
     const body = mentionBody();
     const res = await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
+    await h.settle();
+    const replies = h.slack.messages.filter((m) => m.user === "UBOT");
+    expect(replies).toHaveLength(1);
+    expect(replies[0]!.text).toContain("didn't accept the question");
+    expect(parent.reactions).toEqual([{ name: "warning", user: "UBOT" }]);
+  });
+
+  it("handles a Slack retry like the original, keyed on the event id", async () => {
+    const { app, started, slack, settle, logs } = slackHarness();
+    slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> hello" });
+    const body = mentionBody();
+    await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
+    await app.request("/slack/events", { method: "POST", headers: { ...slackSign(body), "x-slack-retry-num": "1" }, body });
+    await settle();
+    expect(started.map((s) => s.key)).toEqual(["Ev123ABC", "Ev123ABC"]);
+    expect(logs.some((l) => l.includes('"slack_retry"'))).toBe(true);
   });
 });
 
@@ -616,8 +670,8 @@ describe("Slack /slack/deliver", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-triage-timestamp": String(Math.floor(Date.now() / 1000)),
-        "x-triage-signature": "v1=badbadbad",
+        "x-researcher-timestamp": String(Math.floor(Date.now() / 1000)),
+        "x-researcher-signature": "v1=badbadbad",
       },
       body,
     });
@@ -648,8 +702,8 @@ describe("Slack /slack/deliver", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-triage-timestamp": String(timestamp),
-        "x-triage-signature": signature,
+        "x-researcher-timestamp": String(timestamp),
+        "x-researcher-signature": signature,
       },
       body,
     });
@@ -680,8 +734,8 @@ describe("Slack /slack/deliver", () => {
     const { signature, timestamp } = signCallback(secret, body);
     const headers = {
       "content-type": "application/json",
-      "x-triage-timestamp": String(timestamp),
-      "x-triage-signature": signature,
+      "x-researcher-timestamp": String(timestamp),
+      "x-researcher-signature": signature,
     };
 
     await app.request("/slack/deliver", { method: "POST", headers, body });

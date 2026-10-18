@@ -24,7 +24,7 @@ function bash(script: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}) 
 }
 
 beforeAll(async () => {
-  tmp = await mkdtemp(join(tmpdir(), "triage-scripts-"));
+  tmp = await mkdtemp(join(tmpdir(), "researcher-scripts-"));
   const shim = join(tmp, "shim");
   await mkdir(join(tmp, "home"), { recursive: true });
   await mkdir(shim);
@@ -67,15 +67,15 @@ describe("sandbox runtime scripts", { timeout: 30_000 }, () => {
     await cp(FAKE_RUNNER, join(app, "runner/runner.mjs"));
     const user = userInfo().username;
     const lines = {
-      TRIAGE_ROOT: root,
-      TRIAGE_APP_DIR: app,
-      TRIAGE_REPOS_ROOT: join(root, "repos"),
-      TRIAGE_SCRATCH_DIR: join(root, "scratch"),
-      TRIAGE_RUN_AS: user,
-      TRIAGE_DROP: "none",
-      TRIAGE_NODE: process.execPath,
-      TRIAGE_RUNNER_NODE: process.execPath,
-      TRIAGE_PATH: `${join(tmp, "shim")}:${dirname(process.execPath)}:/usr/bin:/bin`,
+      RESEARCHER_ROOT: root,
+      RESEARCHER_APP_DIR: app,
+      RESEARCHER_REPOS_ROOT: join(root, "repos"),
+      RESEARCHER_SCRATCH_DIR: join(root, "scratch"),
+      RESEARCHER_RUN_AS: user,
+      RESEARCHER_DROP: "none",
+      RESEARCHER_NODE: process.execPath,
+      RESEARCHER_RUNNER_NODE: process.execPath,
+      RESEARCHER_PATH: `${join(tmp, "shim")}:${dirname(process.execPath)}:/usr/bin:/bin`,
     };
     await writeFile(join(app, "env"), Object.entries(lines).map(([k, v]) => `${k}=${v}\n`).join(""));
     await writeFile(
@@ -101,7 +101,7 @@ describe("sandbox runtime scripts", { timeout: 30_000 }, () => {
       dnsResolves: expect.any(Boolean),
       selfTest: { ok: true, pi_version: "0.0.0-fake" },
     });
-    expect(await readdir(lines.TRIAGE_SCRATCH_DIR)).toEqual([]);
+    expect(await readdir(lines.RESEARCHER_SCRATCH_DIR)).toEqual([]);
   });
 
   it("run-investigation.sh feeds input on stdin, writes events and exit status beside the run dir, and removes the key", async () => {
@@ -114,14 +114,14 @@ describe("sandbox runtime scripts", { timeout: 30_000 }, () => {
     await writeFile(
       join(app, "env"),
       [
-        `TRIAGE_APP_DIR=${app}`,
-        `TRIAGE_REPOS_ROOT=${join(tmp, "dx/repos")}`,
-        `TRIAGE_SCRATCH_DIR=${join(tmp, "dx/scratch")}`,
-        `TRIAGE_RUN_AS=${userInfo().username}`,
-        "TRIAGE_DROP=none",
-        `TRIAGE_NODE=${process.execPath}`,
-        `TRIAGE_RUNNER_NODE=${process.execPath}`,
-        `TRIAGE_PATH=${dirname(process.execPath)}:/usr/bin:/bin`,
+        `RESEARCHER_APP_DIR=${app}`,
+        `RESEARCHER_REPOS_ROOT=${join(tmp, "dx/repos")}`,
+        `RESEARCHER_SCRATCH_DIR=${join(tmp, "dx/scratch")}`,
+        `RESEARCHER_RUN_AS=${userInfo().username}`,
+        "RESEARCHER_DROP=none",
+        `RESEARCHER_NODE=${process.execPath}`,
+        `RESEARCHER_RUNNER_NODE=${process.execPath}`,
+        `RESEARCHER_PATH=${dirname(process.execPath)}:/usr/bin:/bin`,
       ].join("\n"),
     );
     await mkdir(runDir, { recursive: true, mode: 0o700 });

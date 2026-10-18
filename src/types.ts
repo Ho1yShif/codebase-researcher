@@ -118,27 +118,19 @@ export const RepoManifest = z.object({
 });
 export type RepoManifest = z.infer<typeof RepoManifest>;
 
+/** One configured repository: where to clone it from and how to link to it. */
+const RepoSource = z.object({
+  repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
+  branch: z.string().min(1).optional(),
+  url: CloneUrl.optional(),
+  browse: Browse.optional(),
+});
+
 export const RepoProfile = z.object({
   name: z.string().min(1),
-  repos: z
-    .array(
-      z.object({
-        repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
-        branch: z.string().min(1).optional(),
-        url: CloneUrl.optional(),
-        browse: Browse.optional(),
-      }),
-    )
-    .min(1),
+  repos: z.array(RepoSource).min(1),
 });
 export type RepoProfile = z.infer<typeof RepoProfile>;
-
-export function manifestDigest(manifest: RepoManifest): string {
-  return manifest.repos
-    .map((r) => `${r.repository}@${r.commit}`)
-    .sort()
-    .join(",");
-}
 
 // ── Provider key map ────────────────────────────────────────────────────────
 
@@ -268,14 +260,17 @@ export const RUNNER_EXIT = {
 
 // ── API transcript (the public shape accepted by POST /v1/questions) ────
 
+export const MESSAGE_MAX_CHARS = 8000;
+export const TRANSCRIPT_MAX_MESSAGES = 200;
+
 export const ApiTranscriptMessage = z.object({
-  text: z.string().max(8000),
+  text: z.string().max(MESSAGE_MAX_CHARS),
   author: z.string().optional(),
   is_agent: z.boolean().optional(),
 });
 export type ApiTranscriptMessage = z.infer<typeof ApiTranscriptMessage>;
 
-export const ApiTranscript = z.array(ApiTranscriptMessage).min(1).max(200);
+export const ApiTranscript = z.array(ApiTranscriptMessage).min(1).max(TRANSCRIPT_MAX_MESSAGES);
 export type ApiTranscript = z.infer<typeof ApiTranscript>;
 
 /** Convert the public transcript shape to the internal one the runner expects. */
@@ -333,16 +328,7 @@ export const DEFAULT_CREDENTIALS: HostCredentials = {
 
 export const BotConfig = z.object({
   name: z.string().min(1),
-  repos: z
-    .array(
-      z.object({
-        repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
-        branch: z.string().min(1).optional(),
-        url: CloneUrl.optional(),
-        browse: Browse.optional(),
-      }),
-    )
-    .min(1),
+  repos: RepoProfile.shape.repos,
   gitCredentials: HostCredentials.optional().default(DEFAULT_CREDENTIALS),
   labels: z.object({
     owner: z.string().min(1),
@@ -380,6 +366,14 @@ export type StartQuestion = (
   input: { transcript: ApiTranscript; callback?: Callback; metadata?: QuestionMetadata },
   opts: { idempotencyKey?: string; signal: AbortSignal },
 ) => Promise<{ id: string }>;
+
+/**
+ * Drops blank values before env parsing: a `sync: false` variable left empty in the Render Dashboard arrives
+ * as "", which should mean "unset" (use the default), not an invalid value.
+ */
+export function present(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([, v]) => v?.trim()));
+}
 
 export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

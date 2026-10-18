@@ -119,6 +119,8 @@ describe("bundled runner (runner.mjs)", { timeout: 30_000 }, () => {
   });
 });
 
+// Tests that inspect a command's environment have it write to a file: Pi stops reading a command's stdout
+// 100 ms after the process exits, so under load the tool result can come back empty.
 describe("credentials", { timeout: 30_000 }, () => {
   it("deletes the key file before the session starts and keeps secrets out of the bash env", async () => {
     const fx = makeFixture();
@@ -132,13 +134,14 @@ describe("credentials", { timeout: 30_000 }, () => {
     const { code, stdout, events } = await runScripted(
       makeInput(fx),
       () => [
-        call("bash", { command: `test -e ${keyFile} && echo KEY_FILE_PRESENT || echo KEY_FILE_ABSENT; env` }),
+        call("bash", { command: `(test -e ${keyFile} && echo KEY_FILE_PRESENT || echo KEY_FILE_ABSENT; env) > $HOME/env.txt` }),
         call(SUBMIT, CLARIFY),
       ],
       ["--key-file", keyFile],
     );
 
-    const env = toolResults(events)[0]?.output_preview ?? "";
+    expect(toolResults(events)[0]?.is_error).toBe(false);
+    const env = readFileSync(join(fx.scratchDir, "env.txt"), "utf8");
     expect(env).toContain("KEY_FILE_ABSENT");
     expect(env).toContain(`HOME=${fx.scratchDir}`);
     for (const leaked of ["sk-ant", "ANTHROPIC", "oauth-token-value", "RENDER_API_KEY"]) expect(env).not.toContain(leaked);
@@ -314,13 +317,15 @@ describe("bash tool", { timeout: 30_000 }, () => {
     try {
       const { events } = await runScripted(makeInput(fx), () => [
         call("bash", { command: `git -C ${REPO} grep -n MAX_DELAY_MS -- src` }),
-        call("bash", { command: "env" }),
+        call("bash", { command: "env > $HOME/env.txt" }),
         call(SUBMIT, CLARIFY),
       ]);
-      const [grep, env] = toolResults(events);
+      const [grep, envCall] = toolResults(events);
       expect(grep).toMatchObject({ is_error: false, output_preview: expect.stringContaining("src/retry.ts:1:") });
-      expect(env?.output_preview).toContain(`HOME=${fx.scratchDir}`);
-      expect(env?.output_preview).not.toContain("RENDER_API_KEY");
+      expect(envCall?.is_error).toBe(false);
+      const env = readFileSync(join(fx.scratchDir, "env.txt"), "utf8");
+      expect(env).toContain(`HOME=${fx.scratchDir}`);
+      expect(env).not.toContain("RENDER_API_KEY");
     } finally {
       delete process.env.RENDER_API_KEY;
     }

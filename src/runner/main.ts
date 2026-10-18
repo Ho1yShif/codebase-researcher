@@ -50,7 +50,6 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 /** Reported in `started` and `--self-test`. */
 export const PI_VERSION: string = agentCorePackage.version;
 
-export const DEFAULT_MODEL = "claude-sonnet-4-5";
 export const SUPPORTED_PROVIDERS = ["anthropic", "openai", "google"] as const;
 export type SupportedProvider = (typeof SUPPORTED_PROVIDERS)[number];
 

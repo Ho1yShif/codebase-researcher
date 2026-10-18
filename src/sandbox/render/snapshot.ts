@@ -35,7 +35,7 @@ export async function resolveHeads(profile: RepoProfile, hostCreds: RenderConfig
       const host = new URL(url).hostname;
       const cred = hostCreds[host];
       // The token reaches git only through the environment of this trusted process, never argv or a URL.
-      const envVar = `TRIAGE_TOKEN_${host.replace(/\W/g, "_").toUpperCase()}`;
+      const envVar = `RESEARCHER_TOKEN_${host.replace(/\W/g, "_").toUpperCase()}`;
       const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", ...(cred ? { [envVar]: cred.token } : {}) };
       const auth = ["-c", "credential.helper=", ...(cred ? ["-c", hostTokenHelper(cred.username, envVar)] : [])];
       const args = branch ? ["ls-remote", url, `refs/heads/${branch}`] : ["ls-remote", "--symref", url, "HEAD"];
@@ -86,7 +86,7 @@ export function parseLsRemote(out: string, branch?: string): { branch: string; c
 //   7. Lockdown (chown root, chmod read-only, execute-only node), delete the staging dir
 //   8. verify.sh, then snapshot
 
-const STAGE = "/tmp/triage-stage";
+const STAGE = "/tmp/researcher-stage";
 const STAGE_CREDS = `${STAGE}/creds`;
 const SAFE_REF = /^\w[\w./-]*$/;
 const SAFE_NAME = /^[\w.-]+$/;
@@ -201,15 +201,15 @@ function createRunnerUserCommand(): string {
 function envFileContent(nodePath: string, dropTool: string): string {
   const nodeDir = nodePath.substring(0, nodePath.lastIndexOf("/"));
   return [
-    `TRIAGE_ROOT=${SANDBOX_ROOT}`,
-    `TRIAGE_APP_DIR=${SANDBOX_APP}`,
-    `TRIAGE_REPOS_ROOT=${SANDBOX_REPOS}`,
-    `TRIAGE_SCRATCH_DIR=${SANDBOX_SCRATCH}`,
-    `TRIAGE_RUN_AS=${SANDBOX_RUN_AS}`,
-    `TRIAGE_DROP=${dropTool}`,
-    `TRIAGE_NODE=${nodePath}`,
-    `TRIAGE_RUNNER_NODE=${SANDBOX_APP}/node-runner`,
-    `TRIAGE_PATH=${SANDBOX_APP}/bin:${nodeDir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
+    `RESEARCHER_ROOT=${SANDBOX_ROOT}`,
+    `RESEARCHER_APP_DIR=${SANDBOX_APP}`,
+    `RESEARCHER_REPOS_ROOT=${SANDBOX_REPOS}`,
+    `RESEARCHER_SCRATCH_DIR=${SANDBOX_SCRATCH}`,
+    `RESEARCHER_RUN_AS=${SANDBOX_RUN_AS}`,
+    `RESEARCHER_DROP=${dropTool}`,
+    `RESEARCHER_NODE=${nodePath}`,
+    `RESEARCHER_RUNNER_NODE=${SANDBOX_APP}/node-runner`,
+    `RESEARCHER_PATH=${SANDBOX_APP}/bin:${nodeDir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
   ].join("\n") + "\n";
 }
 
@@ -257,7 +257,7 @@ async function createSnapshot(client: SandboxClient, sandboxId: string, name: st
 /** A gzipped tar of the scripts and a freshly built, self-contained runner bundle. */
 async function stageArchive({ sandboxDir }: RenderConfig): Promise<Buffer> {
   const bundle = await bundleRunner();
-  const dir = await mkdtemp(join(tmpdir(), "triage-stage-"));
+  const dir = await mkdtemp(join(tmpdir(), "researcher-stage-"));
   try {
     await mkdir(join(dir, "runner"));
     await mkdir(join(dir, "build"));

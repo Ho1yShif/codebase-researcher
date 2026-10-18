@@ -3,7 +3,7 @@
 # there. No database.
 #
 # Every secret is declared on the service that uses it, not in an env group: the Blueprint form
-# doesn't reliably prompt for sync: false values inside env groups, and an empty one crashes the API.
+# doesn't reliably prompt for sync: false values inside env groups. A value left blank counts as unset.
 
 projects:
   - name: codebase-researcher
@@ -20,7 +20,7 @@ projects:
             startCommand: pnpm start:api
             healthCheckPath: /healthz
             buildFilter:
-              paths: [src/api.ts, src/slack.ts, src/types.ts, src/callback.ts, config.ts, package.json, pnpm-lock.yaml]
+              paths: [src/api.ts, src/slack.ts, src/types.ts, src/callback.ts, config.ts, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version, tsconfig.json]
             envVars:
               - key: RENDER_API_KEY
                 sync: false
@@ -47,7 +47,7 @@ projects:
             buildCommand: pnpm install --frozen-lockfile
             startCommand: pnpm start:workflow
             buildFilter:
-              paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
+              paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version]
             envVars:
               - key: RENDER_API_KEY
                 sync: false
@@ -76,7 +76,7 @@ projects:
             buildCommand: pnpm install --frozen-lockfile
             startCommand: pnpm refresh
             buildFilter:
-              paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml]
+              paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version]
             envVars:
               - key: RENDER_API_KEY
                 sync: false

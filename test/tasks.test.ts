@@ -179,6 +179,28 @@ describe("answerQuestion", () => {
     expect(result.outcome).toBe("answer");
     expect(h.logs.some((l) => l.event === "deliver_failed")).toBe(true);
   });
+
+  it("delivers a failure reply for a transcript over the limits instead of throwing", async () => {
+    const h = harness();
+    const result = await answerQuestion(h.deps, "trace-long", {
+      transcript: [{ text: "x".repeat(8001) }],
+      callback: { url: "https://example.com/hook", secret: "c".repeat(32) },
+      metadata: { channel: "C1" },
+    });
+
+    expect(result.reply).toMatchObject({ kind: "failure", reason: expect.stringContaining("couldn't be read") });
+    expect(h.sandboxes.runs).toHaveLength(0);
+    expect(h.deliveries).toHaveLength(1);
+    expect(JSON.parse(h.deliveries[0]!.body)).toMatchObject({ reply: { kind: "failure" }, metadata: { channel: "C1" } });
+    expect(h.logs.some((l) => l.event === "invalid_question")).toBe(true);
+  });
+
+  it("returns a failure reply for invalid input without a callback", async () => {
+    const h = harness();
+    const result = await answerQuestion(h.deps, "trace-bad", { transcript: [] });
+    expect(result.reply.kind).toBe("failure");
+    expect(h.deliveries).toHaveLength(0);
+  });
 });
 
 describe("deliverCallback", () => {
@@ -206,8 +228,8 @@ describe("deliverCallback", () => {
       });
 
       expect(received).toHaveLength(1);
-      expect(received[0]!.headers["x-triage-timestamp"]).toMatch(/^\d+$/);
-      expect(received[0]!.headers["x-triage-signature"]).toMatch(/^v1=[0-9a-f]{64}$/);
+      expect(received[0]!.headers["x-researcher-timestamp"]).toMatch(/^\d+$/);
+      expect(received[0]!.headers["x-researcher-signature"]).toMatch(/^v1=[0-9a-f]{64}$/);
       expect(received[0]!.headers["content-type"]).toBe("application/json");
     } finally {
       server.close();
@@ -252,7 +274,14 @@ describe("investigate", () => {
     expect(result).toEqual({ kind: "failed", code: "no_snapshot" });
 
     const { reply } = await answerQuestion(h.deps, "t2", { transcript: TRANSCRIPT });
-    expect(reply.kind === "failure" && reply.reason).toContain("repository snapshot isn't ready yet");
+    expect(reply.kind === "failure" && reply.reason).toContain("no repository snapshot is available");
+  });
+
+  it("says the snapshot isn't ready when one exists but isn't available", async () => {
+    const h = harness();
+    h.sandboxes.noSnapshot = "notReady";
+    const result = await investigateTask(h.invDeps(), { transcript: [], trace_id: "t3" });
+    expect(result).toEqual({ kind: "failed", code: "snapshot_not_ready" });
   });
 
   it("throws for infra errors so the subtask retries", async () => {

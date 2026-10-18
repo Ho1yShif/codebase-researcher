@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  # Validation checks plans, regions, and conflicts against a real workspace, so it needs an API key.
+  # Set the RENDER_API_KEY secret and the RENDER_WORKSPACE_ID variable to turn it on; forks without them skip it.
+  blueprint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      RENDER_WORKSPACE_ID: ${{ vars.RENDER_WORKSPACE_ID }}
+      RENDER_CLI_VERSION: 2.29.0
+      CI: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Render CLI
+        if: env.RENDER_API_KEY != '' && env.RENDER_WORKSPACE_ID != ''
+        run: |
+          curl -fsSL -o render.zip "https://github.com/render-oss/cli/releases/download/v${RENDER_CLI_VERSION}/cli_${RENDER_CLI_VERSION}_linux_amd64.zip"
+          unzip -q render.zip "cli_v${RENDER_CLI_VERSION}"
+          sudo install -m 755 "cli_v${RENDER_CLI_VERSION}" /usr/local/bin/render
+      - name: Validate render.yaml
+        if: env.RENDER_API_KEY != '' && env.RENDER_WORKSPACE_ID != ''
+        run: render blueprints validate render.yaml --workspace "$RENDER_WORKSPACE_ID" -o text

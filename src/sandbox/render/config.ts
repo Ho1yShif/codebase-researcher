@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { z } from "zod";
 import config from "../../../config.ts";
-import { DEFAULT_CREDENTIALS, type HostCredentials } from "../../types.ts";
+import { DEFAULT_CREDENTIALS, present, type HostCredentials } from "../../types.ts";
 import { REPO_ROOT } from "../interface.ts";
 
 export type NetworkPolicy =
@@ -38,7 +38,7 @@ export async function loadRenderConfig(
       SANDBOX_BUILDER_TIMEOUT_SECONDS: positiveInt(3_600).pipe(z.number().max(86_400)),
       RENDER_API_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(1_000),
     })
-    .parse(env);
+    .parse(present(env));
   const explicit = e.SANDBOX_ALLOWED_DOMAINS?.split(",").map((d) => d.trim()).filter(Boolean);
   const domains = explicit?.length ? explicit : derivedAllowedDomain ? [derivedAllowedDomain] : [];
   if (e.SANDBOX_NETWORK_POLICY === "allow-list" && !domains.length && e.SANDBOX_ALLOWED_DOMAINS !== undefined) {

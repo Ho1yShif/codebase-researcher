@@ -37,12 +37,18 @@ async function run(id: string, command: string): Promise<{ exitCode: number; std
   throw new Error(`exec ended without an exit event: ${command}`);
 }
 
+/**
+ * The API takes a network policy as `{ type }` (plus `rules` for an allow-list); SDK 1.2.0's types still
+ * describe the older `{ default }` shape, hence the cast. src/sandbox/render/sandbox.ts does the same in wirePolicy.
+ */
+const denyAll = { type: "deny-all" } as unknown as { default: "deny-all" };
+
 const sandbox = await sandboxes.create({
   ...(snapshotName ? { snapshotName } : {}),
   // Backstop: Render terminates the sandbox after this even if this process dies before `terminate`.
   timeoutSeconds: 600,
-  // This example needs no egress. Grant the least you need: allow-list a few hosts, or allow-all.
-  networkPolicy: { default: "deny-all" },
+  // This example needs no egress, so it gets none. Grant the least your work needs.
+  networkPolicy: denyAll,
 });
 console.log(`created ${sandbox.id} (${sandbox.status})`);
 
