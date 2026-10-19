@@ -1,8 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RunnerEvent } from "../src/types.ts";
-import type { RunnerInput } from "../src/types.ts";
+import { RunnerEvent, type RunnerInput } from "../src/runner/protocol.ts";
 import { git } from "../src/sandbox/interface.ts";
 import { writeRunnerBundle } from "../src/sandbox/runner-bundle.ts";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -28,7 +27,7 @@ export async function makeRepo(root: string, repository: string): Promise<{ path
   return { path, commit: await git(["rev-parse", "HEAD"], { cwd: path }) };
 }
 
-export async function commitAll(path: string, message: string): Promise<string> {
+async function commitAll(path: string, message: string): Promise<string> {
   await git([...ident, "add", "-A"], { cwd: path });
   await git([...ident, "commit", "-q", "-m", message], { cwd: path });
   return git(["rev-parse", "HEAD"], { cwd: path });

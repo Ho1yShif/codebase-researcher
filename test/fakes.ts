@@ -1,5 +1,6 @@
-import type { Slack, BotIdentity } from "../src/slack.ts";
-import type { RepoManifest, RunnerEvent } from "../src/types.ts";
+import type { Slack, BotIdentity } from "../src/slack/client.ts";
+import type { RepoManifest } from "../src/manifest.ts";
+import type { RunnerEvent } from "../src/runner/protocol.ts";
 import { SnapshotUnavailableError, type OpenSandbox, type RunInvestigationOptions, type RunInvestigationResult } from "../src/sandbox/interface.ts";
 
 type Reaction = { name: string; user: string };

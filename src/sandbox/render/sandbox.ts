@@ -2,20 +2,20 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ClientError, SandboxSnapshotNotFoundError, SandboxSnapshotNotReadyError } from "@renderinc/sdk";
 import { z } from "zod";
-import { RepoManifest, errorMessage } from "../../types.ts";
+import { RepoManifest } from "../../manifest.ts";
+import { errorMessage } from "../../util.ts";
 import {
   SnapshotUnavailableError,
   appendStderrTail,
   parseRunnerEvents,
   shq,
+  type OpenSandboxOptions,
   type RunInvestigationOptions,
   type RunInvestigationResult,
   type Sandbox,
 } from "../interface.ts";
 import { TRANSIENT, type SandboxApi, type SandboxClient } from "./client.ts";
 import type { NetworkPolicy } from "./config.ts";
-
-// ── Sandbox layout and verification ─────────────────────────────────────
 
 /** Fixed paths inside every sandbox. The snapshot build creates them; restored sandboxes find them in place. */
 export const SANDBOX_ROOT = "/opt/researcher";
@@ -42,10 +42,14 @@ type SandboxInfo = z.infer<typeof SandboxInfo>;
 export async function verifySandbox(
   client: SandboxClient,
   id: string,
-  opts: { probes?: NetworkPolicy; waitReady?: boolean } = {},
+  opts: { probes?: NetworkPolicy; waitReady?: boolean; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<SandboxInfo> {
   const command = `bash ${SANDBOX_APP}/verify.sh${opts.probes ? probeArgs(opts.probes) : ""}`;
-  const res = await client.exec(id, command, { timeoutMs: client.t.verifyTimeoutMs, waitReady: opts.waitReady });
+  const res = await client.exec(id, command, {
+    timeoutMs: opts.timeoutMs ?? client.t.verifyTimeoutMs,
+    waitReady: opts.waitReady,
+    signal: opts.signal,
+  });
   if (res.exitCode !== 0) throw new Error(`verify.sh exited ${res.exitCode}: ${res.stderr.trim().slice(-2000)}`);
   const last = res.stdout.trim().split("\n").at(-1) ?? "";
   try {
@@ -56,12 +60,10 @@ export async function verifySandbox(
 }
 
 function probeArgs(policy: NetworkPolicy): string {
-  if (policy.default === "allow-all") return "";
-  const allowed = policy.default === "allow-list" ? policy.allowedDomains.find((d) => !d.startsWith("*.")) : undefined;
+  if (policy.type === "allow-all") return "";
+  const allowed = policy.type === "allow-list" ? policy.domains.find((d) => !d.startsWith("*.")) : undefined;
   return ` --deny-probe ${DENY_PROBE_URL}${allowed ? ` --allow-probe ${shq(`https://${allowed}`)}` : ""}`;
 }
-
-// ── Network policy wire format ──────────────────────────────────────────
 
 type WirePolicy = NonNullable<Parameters<SandboxApi["create"]>[0]>["networkPolicy"];
 
@@ -71,9 +73,9 @@ type WirePolicy = NonNullable<Parameters<SandboxApi["create"]>[0]>["networkPolic
  */
 export function wirePolicy(policy: NetworkPolicy): WirePolicy {
   const wire =
-    policy.default === "allow-list"
-      ? { type: policy.default, rules: policy.allowedDomains.map((domain) => ({ domain, protocol: "https" })) }
-      : { type: policy.default };
+    policy.type === "allow-list"
+      ? { type: policy.type, rules: policy.domains.map((domain) => ({ domain, protocol: "https" })) }
+      : { type: policy.type };
   return wire as unknown as WirePolicy;
 }
 
@@ -82,22 +84,25 @@ function policyType(policy: WirePolicy | undefined): string | undefined {
   return policy && ((policy as { type?: string }).type ?? policy.default);
 }
 
-// ── Investigation sandboxes ─────────────────────────────────────────────
-
 /**
  * Creates a sandbox from the newest available snapshot with `snapshotName`, under the configured
  * network policy and a provider-side timeout backstop, then verifies it (including egress probes)
- * and reads its manifest. Terminates the sandbox if anything after creation fails.
+ * and reads its manifest, all within `timeoutMs`. Terminates the sandbox if anything after creation fails.
  */
-export async function openRenderSandbox(client: SandboxClient, snapshotName: string): Promise<Sandbox> {
+export async function openRenderSandbox(client: SandboxClient, snapshotName: string, { timeoutMs }: OpenSandboxOptions): Promise<Sandbox> {
   const policy = client.cfg.networkPolicy;
-  if (policy.default === "allow-list" && !policy.allowedDomains.length) {
+  if (policy.type === "allow-list" && !policy.domains.length) {
     throw new Error("cannot create an investigation sandbox with allow-list policy and no domains");
   }
+  // SDK 1.2.0's create and get take no signal: one of those requests in flight can finish past the deadline.
+  const signal = AbortSignal.timeout(timeoutMs);
+  const timedOut = (cause: unknown) =>
+    new Error(`could not open a sandbox from ${JSON.stringify(snapshotName)} within ${timeoutMs}ms (SANDBOX_PROVISION_TIMEOUT_MS)`, { cause });
   let created: Awaited<ReturnType<SandboxApi["create"]>>;
   try {
-    created = await client.call(() =>
-      client.api.create({ snapshotName, networkPolicy: wirePolicy(policy), timeoutSeconds: client.cfg.investigationTimeoutSeconds }),
+    created = await client.call(
+      () => client.api.create({ snapshotName, networkPolicy: wirePolicy(policy), timeoutSeconds: client.cfg.investigationTimeoutSeconds }),
+      { signal },
     );
   } catch (err) {
     if (err instanceof SandboxSnapshotNotFoundError || err instanceof SandboxSnapshotNotReadyError) {
@@ -106,9 +111,10 @@ export async function openRenderSandbox(client: SandboxClient, snapshotName: str
         notReady: err instanceof SandboxSnapshotNotReadyError,
       });
     }
-    if (policy.default === "allow-list" && err instanceof ClientError && [400, 422].includes(err.statusCode)) {
+    if (signal.aborted) throw timedOut(err);
+    if (policy.type === "allow-list" && err instanceof ClientError && [400, 422].includes(err.statusCode)) {
       throw new Error(
-        `Render rejected networkPolicy allow-list [${policy.allowedDomains.join(", ")}]: ${err.message}. ` +
+        `Render rejected networkPolicy allow-list [${policy.domains.join(", ")}]: ${err.message}. ` +
           "This workspace may not support allow-list egress; set SANDBOX_NETWORK_POLICY=allow-all (or deny-all) to proceed.",
         { cause: err },
       );
@@ -118,14 +124,14 @@ export async function openRenderSandbox(client: SandboxClient, snapshotName: str
   const { id } = created;
   try {
     const createdType = policyType(created.networkPolicy);
-    if (created.networkPolicy && createdType !== policy.default) {
-      throw new Error(`Render created ${id} with networkPolicy ${createdType}, not ${policy.default}; refusing to widen egress`);
+    if (created.networkPolicy && createdType !== policy.type) {
+      throw new Error(`Render created ${id} with networkPolicy ${createdType}, not ${policy.type}; refusing to widen egress`);
     }
-    await client.waitRunning(id);
-    const info = await verifySandbox(client, id, { probes: policy, waitReady: true });
+    await client.waitRunning(id, { timeoutMs, signal });
+    const info = await verifySandbox(client, id, { probes: policy, waitReady: true, timeoutMs, signal });
     // verify.sh can only probe /proc as root; a sandbox where it couldn't check doesn't get the model key.
     if (!info.runnerNonDumpable) throw new Error(`could not confirm the runner is non-dumpable in ${id}; refusing to run an investigation`);
-    const manifest = RepoManifest.parse(JSON.parse(await client.download(id, `${SANDBOX_APP}/manifest.json`)));
+    const manifest = RepoManifest.parse(JSON.parse(await client.download(id, `${SANDBOX_APP}/manifest.json`, signal)));
     return {
       id,
       manifest,
@@ -146,7 +152,7 @@ export async function openRenderSandbox(client: SandboxClient, snapshotName: str
     };
   } catch (err) {
     await client.terminateQuietly(id);
-    throw err;
+    throw signal.aborted ? timedOut(err) : err;
   }
 }
 

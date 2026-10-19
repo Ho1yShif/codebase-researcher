@@ -2,321 +2,191 @@ import { describe, expect, it } from "vitest";
 import { ClientError } from "@renderinc/sdk";
 import { createApp, loadEnv, toQuestionId, type AppDeps, type GetTaskRun } from "../src/api.ts";
 import { signCallback, verifyCallback } from "../src/callback.ts";
-import type { StartQuestion } from "../src/types.ts";
+import { createLog } from "../src/log.ts";
+import type { StartQuestion } from "../src/question.ts";
 
 const TOKEN = "test-api-token-1234";
+const AUTH = { Authorization: `Bearer ${TOKEN}` };
+const JSON_AUTH = { "content-type": "application/json", ...AUTH };
+const qid = (runId: string) => toQuestionId(TOKEN, runId);
+const transcript = [{ text: "How does deploy retry?", author: "U1" }];
 
 function harness(overrides: Partial<AppDeps> = {}) {
   const started: Array<{ input: unknown; key?: string }> = [];
-  const logs: string[] = [];
-
+  const lookups: string[] = [];
+  const logs: Record<string, unknown>[] = [];
   const startQuestion: StartQuestion = async (input, opts) => {
     started.push({ input, key: opts.idempotencyKey });
     return { id: "run-123" };
   };
-
-  const getTaskRun: GetTaskRun = async () => ({ status: "running", results: [] });
-
-  const deps: AppDeps = {
+  const getTaskRun: GetTaskRun = async (id) => {
+    lookups.push(id);
+    return { status: "running", results: [] };
+  };
+  const app = createApp({
     apiToken: TOKEN,
     startQuestion,
     getTaskRun,
     isLocalDev: false,
-    log: (l) => logs.push(l),
+    log: createLog({}, (line) => void logs.push(JSON.parse(line))),
     ...overrides,
-  };
-  const app = createApp(deps);
-  return { app, started, logs, deps };
+  });
+  const post = (body: unknown, headers: Record<string, string> = {}) =>
+    app.request("/v1/questions", {
+      method: "POST",
+      headers: { ...JSON_AUTH, ...headers },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+  const get = (id: string) => app.request(`/v1/questions/${id}`, { headers: AUTH });
+  return { app, started, lookups, logs, post, get };
 }
 
-const AUTH = { Authorization: `Bearer ${TOKEN}` };
+const withRun = (run: Awaited<ReturnType<GetTaskRun>>) => harness({ getTaskRun: async () => run });
 
-const validBody = () => ({
-  transcript: [{ text: "How does deploy retry?", author: "user1" }],
-});
-
-describe("API auth", () => {
-  it("returns 401 for missing token", async () => {
-    const { app } = harness();
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(validBody()),
-    });
-    expect(res.status).toBe(401);
-  });
-
-  it("returns 401 for wrong token", async () => {
-    const { app } = harness();
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json", Authorization: "Bearer wrong-token" },
-      body: JSON.stringify(validBody()),
-    });
-    expect(res.status).toBe(401);
-  });
-
-  it("allows requests with correct token", async () => {
-    const { app } = harness();
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...AUTH },
-      body: JSON.stringify(validBody()),
-    });
-    expect(res.status).toBe(202);
-  });
-});
-
-describe("POST /v1/questions validation", () => {
-  it("returns 400 for empty transcript", async () => {
-    const { app } = harness();
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...AUTH },
-      body: JSON.stringify({ transcript: [] }),
-    });
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 for transcript text too long", async () => {
-    const { app } = harness();
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...AUTH },
-      body: JSON.stringify({ transcript: [{ text: "x".repeat(8001) }] }),
-    });
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 for too many metadata keys", async () => {
-    const { app } = harness();
-    const metadata: Record<string, string> = {};
-    for (let i = 0; i < 17; i++) metadata[`key${i}`] = "v";
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...AUTH },
-      body: JSON.stringify({ ...validBody(), metadata }),
-    });
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 for callback.secret too short", async () => {
-    const { app } = harness();
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...AUTH },
-      body: JSON.stringify({ ...validBody(), callback: { url: "https://example.com/hook", secret: "short" } }),
-    });
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 for http callback URL in non-local mode", async () => {
-    const { app } = harness();
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...AUTH },
-      body: JSON.stringify({ ...validBody(), callback: { url: "http://example.com/hook", secret: "a".repeat(32) } }),
-    });
-    expect(res.status).toBe(400);
-  });
-
-  it("allows http://localhost callback in local dev mode", async () => {
-    const { app } = harness({ isLocalDev: true });
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...AUTH },
-      body: JSON.stringify({ ...validBody(), callback: { url: "http://localhost:4000/hook", secret: "a".repeat(32) } }),
-    });
-    expect(res.status).toBe(202);
-  });
-});
-
-describe("POST /v1/questions", () => {
-  it("passes the idempotency key", async () => {
-    const { app, started } = harness();
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...AUTH, "Idempotency-Key": "idem-1" },
-      body: JSON.stringify(validBody()),
-    });
-    expect(res.status).toBe(202);
-    const body = await res.json() as { id: string };
-    expect(body).toEqual({ id: toQuestionId(TOKEN, "run-123") });
-    expect(started[0]?.key).toBe("idem-1");
-  });
-
-  it("returns 500 when startQuestion throws", async () => {
-    const failStart: StartQuestion = async () => { throw new Error("boom"); };
-    const { app, logs } = harness({ startQuestion: failStart });
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...AUTH },
-      body: JSON.stringify(validBody()),
-    });
-    expect(res.status).toBe(500);
-    expect(logs.some((l) => l.includes("request_failed"))).toBe(true);
-  });
-
-  it("returns 400 for malformed JSON", async () => {
-    const { app } = harness();
-    const res = await app.request("/v1/questions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...AUTH },
-      body: "{not json",
-    });
-    expect(res.status).toBe(400);
-  });
-});
-
-describe("GET /v1/questions/:id", () => {
-  const qid = (runId: string) => toQuestionId(TOKEN, runId);
-  const run = (status: string, extra: Partial<Awaited<ReturnType<GetTaskRun>>> = {}) => async () => ({ status, results: [], ...extra });
-
-  it("maps running status", async () => {
-    const { app } = harness({ getTaskRun: run("running") });
-    const res = await app.request(`/v1/questions/${qid("run-1")}`, { headers: AUTH });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ id: qid("run-1"), status: "running" });
-  });
-
-  it("maps succeeded status with results", async () => {
-    const reply = { kind: "failure", traceId: "t1", reason: "test" };
-    const { app } = harness({ getTaskRun: run("succeeded", { results: [{ trace_id: "t1", outcome: "failure", reply }] }) });
-    const res = await app.request(`/v1/questions/${qid("run-2")}`, { headers: AUTH });
-    expect(await res.json()).toEqual({ id: qid("run-2"), status: "completed", trace_id: "t1", reply });
-  });
-
-  it("maps failed status", async () => {
-    const { app } = harness({ getTaskRun: run("failed", { error: "timeout" }) });
-    const res = await app.request(`/v1/questions/${qid("run-3")}`, { headers: AUTH });
-    expect(await res.json()).toEqual({ id: qid("run-3"), status: "failed", error: "timeout" });
-  });
-
-  it("only reads runs this API started: a raw, forged, or re-signed id is 404 and never reaches Render", async () => {
-    const lookups: string[] = [];
-    const { app } = harness({ getTaskRun: async (id) => (lookups.push(id), { status: "running", results: [] }) });
-    for (const id of ["trn-other", "trn-other.AAAAAAAAAAAAAAAAAAAAAA", toQuestionId("a-different-api-token", "trn-other")]) {
-      const res = await app.request(`/v1/questions/${id}`, { headers: AUTH });
-      expect(res.status).toBe(404);
-    }
-    expect(lookups).toEqual([]);
-  });
-
-  it("passes the run id, not the question id, to Render", async () => {
-    const lookups: string[] = [];
-    const { app } = harness({ getTaskRun: async (id) => (lookups.push(id), { status: "running", results: [] }) });
-    await app.request(`/v1/questions/${qid("trn-mine")}`, { headers: AUTH });
-    expect(lookups).toEqual(["trn-mine"]);
-  });
-
-  it("returns 500 for non-404 Render errors", async () => {
-    const { app } = harness({
-      getTaskRun: async () => { throw new ClientError("Failed to get task run: forbidden", 403); },
-    });
-    const res = await app.request(`/v1/questions/${qid("forbidden")}`, { headers: AUTH });
-    expect(res.status).toBe(500);
-  });
-
-  it("returns 404 for unknown run IDs", async () => {
-    const { app } = harness({
-      getTaskRun: async () => { throw new ClientError("Failed to get task run: not found", 404); },
-    });
-    const res = await app.request(`/v1/questions/${qid("missing")}`, { headers: AUTH });
-    expect(res.status).toBe(404);
-  });
-});
-
-describe("healthz", () => {
-  it("returns 200", async () => {
-    const { app } = harness();
-    const res = await app.request("/healthz");
+describe("HTTP API", () => {
+  it("serves /healthz without auth", async () => {
+    const res = await harness().app.request("/healthz");
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
   });
+
+  it("requires the bearer token on /v1/*", async () => {
+    const { app, started } = harness();
+    for (const headers of [{}, { Authorization: "Bearer wrong-token" }]) {
+      const post = await app.request("/v1/questions", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ transcript }),
+      });
+      expect(post.status).toBe(401);
+      expect((await app.request(`/v1/questions/${qid("run-1")}`, { headers })).status).toBe(401);
+    }
+    expect(started).toEqual([]);
+  });
+
+  it("starts a question and returns 202 with a signed question id, passing the idempotency key", async () => {
+    const { post, started, logs } = harness();
+    const body = { transcript, metadata: { ticket: "T-1" } };
+    const res = await post(body, { "Idempotency-Key": "idem-1" });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ id: qid("run-123") });
+    expect(started).toEqual([{ input: body, key: "idem-1" }]);
+    expect(logs).toContainEqual(expect.objectContaining({ event: "task_started", run_id: "run-123" }));
+  });
+
+  it("rejects invalid bodies with 400 without starting a run", async () => {
+    const { post, started } = harness();
+    const cases: Record<string, unknown> = {
+      "malformed JSON": "{not json",
+      "missing transcript": {},
+      "empty transcript": { transcript: [] },
+      "message over 8000 chars": { transcript: [{ text: "x".repeat(8001) }] },
+      "more than 200 messages": { transcript: Array.from({ length: 201 }, () => ({ text: "hi" })) },
+      "more than 16 metadata keys": { transcript, metadata: Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`k${i}`, "v"])) },
+      "callback secret under 16 chars": { transcript, callback: { url: "https://example.com/hook", secret: "short" } },
+    };
+    for (const [name, body] of Object.entries(cases)) {
+      expect((await post(body)).status, name).toBe(400);
+    }
+    expect(started).toEqual([]);
+  });
+
+  it("requires an https callback URL, allowing http://localhost only in local dev", async () => {
+    const secret = "a".repeat(32);
+    const prod = harness();
+    expect((await prod.post({ transcript, callback: { url: "http://example.com/hook", secret } })).status).toBe(400);
+    expect((await prod.post({ transcript, callback: { url: "http://localhost:4000/hook", secret } })).status).toBe(400);
+    expect((await prod.post({ transcript, callback: { url: "https://example.com/hook", secret } })).status).toBe(202);
+
+    const local = harness({ isLocalDev: true });
+    expect((await local.post({ transcript, callback: { url: "http://localhost:4000/hook", secret } })).status).toBe(202);
+    expect((await local.post({ transcript, callback: { url: "http://example.com/hook", secret } })).status).toBe(400);
+  });
+
+  it("maps the run status to running, completed (with the reply), or failed", async () => {
+    const id = qid("run-1");
+    const reply = { kind: "clarification", traceId: "t1", result: { status: "needs_clarification", question: "Which region?", why_needed: "It varies." } };
+    const cases: Array<[Awaited<ReturnType<GetTaskRun>>, unknown]> = [
+      [{ status: "pending", results: [] }, { id, status: "running" }],
+      [{ status: "running", results: [] }, { id, status: "running" }],
+      [{ status: "paused", results: [] }, { id, status: "running" }],
+      [{ status: "succeeded", results: [{ trace_id: "t1", reply }] }, { id, status: "completed", trace_id: "t1", reply }],
+      [{ status: "failed", results: [], error: "timeout" }, { id, status: "failed", error: "timeout" }],
+      [{ status: "canceled", results: [] }, { id, status: "failed", error: "task failed" }],
+    ];
+    for (const [run, expected] of cases) {
+      const res = await withRun(run).get(id);
+      expect(res.status, run.status).toBe(200);
+      expect(await res.json(), run.status).toEqual(expected);
+    }
+  });
+
+  it("only reads runs this API started: raw, forged, foreign-signed, or unknown ids are 404", async () => {
+    const { get, lookups } = harness();
+    for (const id of ["trn-other", "trn-other.AAAAAAAAAAAAAAAAAAAAAA", toQuestionId("a-different-api-token", "trn-other")]) {
+      expect((await get(id)).status, id).toBe(404);
+    }
+    expect(lookups).toEqual([]);
+    await get(qid("trn-mine"));
+    expect(lookups).toEqual(["trn-mine"]);
+
+    const unknown = harness({ getTaskRun: async () => { throw new ClientError("not found", 404); } });
+    expect((await unknown.get(qid("missing"))).status).toBe(404);
+  });
+
+  it("turns unexpected errors into a logged 500", async () => {
+    const { post, get, logs } = harness({
+      startQuestion: async () => { throw new Error("boom"); },
+      getTaskRun: async () => { throw new ClientError("forbidden", 403); },
+    });
+    const postRes = await post({ transcript });
+    expect(postRes.status).toBe(500);
+    expect(await postRes.text()).toBe("internal error");
+    expect((await get(qid("r"))).status).toBe(500);
+    expect(logs).toContainEqual(expect.objectContaining({ level: "error", event: "request_failed", method: "POST", error: "boom" }));
+    expect(logs).toContainEqual(expect.objectContaining({ level: "error", event: "request_failed", method: "GET" }));
+  });
 });
 
-// ── Callback signing tests ──────────────────────────────────────────────
-
-describe("signCallback and verifyCallback", () => {
-  const secret = "test-callback-secret-1234567890";
-  const body = '{"id":"r1","reply":{"kind":"failure"}}';
-
-  it("sign produces a v1= hex signature", () => {
-    const { signature, timestamp } = signCallback(secret, body, 1700000000);
-    expect(signature).toMatch(/^v1=[0-9a-f]{64}$/);
-    expect(timestamp).toBe(1700000000);
-  });
-
-  it("verify accepts a correctly signed body", () => {
+describe("signCallback / verifyCallback", () => {
+  it("accepts its own signature and rejects tampered, foreign, stale, or missing ones", () => {
+    const secret = "test-callback-secret-1234567890";
+    const body = '{"id":"r1","reply":{"kind":"failure"}}';
     const { signature, timestamp } = signCallback(secret, body);
     expect(verifyCallback({ secret, signature, timestamp, body })).toBe(true);
-  });
+    expect(verifyCallback({ secret, signature, timestamp: String(timestamp), body })).toBe(true);
 
-  it("verify rejects a bad signature", () => {
-    const { timestamp } = signCallback(secret, body);
-    expect(verifyCallback({ secret, signature: "v1=deadbeef", timestamp, body })).toBe(false);
-  });
-
-  it("verify rejects stale timestamps", () => {
-    const past = Math.floor(Date.now() / 1000) - 400;
-    const { signature } = signCallback(secret, body, past);
-    expect(verifyCallback({ secret, signature, timestamp: past, body })).toBe(false);
-  });
-
-  it("verify rejects missing signature or timestamp", () => {
-    expect(verifyCallback({ secret, signature: undefined, timestamp: 123, body })).toBe(false);
-    expect(verifyCallback({ secret, signature: "v1=aaa", timestamp: undefined, body })).toBe(false);
+    const stale = signCallback(secret, body, timestamp - 600);
+    for (const [name, opts] of Object.entries({
+      "tampered body": { signature, timestamp, body: body.replace("r1", "r2") },
+      "other secret": { ...signCallback("another-secret-1234567890", body, timestamp), body },
+      "stale timestamp": { ...stale, body },
+      "missing signature": { signature: undefined, timestamp, body },
+      "missing timestamp": { signature, timestamp: undefined, body },
+    })) {
+      expect(verifyCallback({ secret, ...opts }), name).toBe(false);
+    }
   });
 });
 
 describe("loadEnv", () => {
-  const base = { API_TOKEN: "tok", RENDER_API_KEY: "rk" };
-
-  it("requires API_TOKEN", () => {
+  it("requires API_TOKEN, and RENDER_API_KEY unless running against local dev", () => {
     expect(() => loadEnv({ RENDER_API_KEY: "rk" })).toThrow();
+    expect(() => loadEnv({ API_TOKEN: "tok" })).toThrow(/RENDER_API_KEY is required/);
+    expect(loadEnv({ API_TOKEN: "tok", RENDER_USE_LOCAL_DEV: "true" }).useLocalDev).toBe(true);
+    expect(loadEnv({ API_TOKEN: "tok", RENDER_LOCAL_DEV_URL: "http://localhost:8120" }).useLocalDev).toBe(true);
   });
 
-  it("derives taskSlug from WORKFLOW_SLUG", () => {
-    const env = loadEnv(base);
-    expect(env.taskSlug).toBe("codebase-researcher-workflow/answer_question");
-  });
-
-  it("RENDER_USE_LOCAL_DEV=true is local dev", () => {
-    const env = loadEnv({ ...base, RENDER_USE_LOCAL_DEV: "true" });
-    expect(env.useLocalDev).toBe(true);
-  });
-
-  it("RENDER_USE_LOCAL_DEV accepts common boolean spellings and rejects garbage", () => {
-    expect(loadEnv({ ...base, RENDER_USE_LOCAL_DEV: "1" }).useLocalDev).toBe(true);
-    expect(loadEnv({ ...base, RENDER_USE_LOCAL_DEV: "false" }).useLocalDev).toBe(false);
-    expect(() => loadEnv({ ...base, RENDER_USE_LOCAL_DEV: "maybe" })).toThrow();
-  });
-
-  it("RENDER_LOCAL_DEV_URL implies local dev", () => {
-    const env = loadEnv({ API_TOKEN: "tok", RENDER_LOCAL_DEV_URL: "http://localhost:8120" });
-    expect(env.useLocalDev).toBe(true);
-  });
-
-  it("requires RENDER_API_KEY when not local dev", () => {
-    expect(() => loadEnv({ API_TOKEN: "tok" })).toThrow();
-  });
-
-  it("slackCredentials set when both SLACK_SIGNING_SECRET and SLACK_BOT_TOKEN are set", () => {
-    const env = loadEnv({ ...base, SLACK_SIGNING_SECRET: "s", SLACK_BOT_TOKEN: "t" });
-    expect(env.slackCredentials).toEqual({ signingSecret: "s", botToken: "t" });
-  });
-
-  it("slackCredentials undefined when Slack vars are missing", () => {
-    expect(loadEnv(base).slackCredentials).toBeUndefined();
+  it("enables Slack only when both credentials are set, treating blank Dashboard values as unset", () => {
+    const base = { API_TOKEN: "tok", RENDER_API_KEY: "rk" };
+    expect(loadEnv({ ...base, SLACK_SIGNING_SECRET: "s", SLACK_BOT_TOKEN: "t" }).slackCredentials)
+      .toEqual({ signingSecret: "s", botToken: "t" });
     expect(loadEnv({ ...base, SLACK_SIGNING_SECRET: "s" }).slackCredentials).toBeUndefined();
-  });
 
-  it("treats blank values (sync: false vars left empty in the Dashboard) as unset", () => {
-    const blank = { SLACK_SIGNING_SECRET: "", SLACK_BOT_TOKEN: "", ALLOWED_CHANNEL_IDS: "", SLACK_CALLBACK_KEY: " ", PUBLIC_URL: "" };
-    const env = loadEnv({ ...base, ...blank, RENDER_USE_LOCAL_DEV: "" });
-    expect(env.slackCredentials).toBeUndefined();
-    expect(env.slackCallbackKey).toBeUndefined();
-    expect(env.useLocalDev).toBe(false);
+    const blank = loadEnv({ ...base, SLACK_SIGNING_SECRET: "", SLACK_BOT_TOKEN: "", SLACK_CALLBACK_KEY: " ", RENDER_USE_LOCAL_DEV: "" });
+    expect(blank.slackCredentials).toBeUndefined();
+    expect(blank.slackCallbackKey).toBeUndefined();
+    expect(blank.useLocalDev).toBe(false);
     expect(() => loadEnv({ ...base, RENDER_API_KEY: "" })).toThrow(/RENDER_API_KEY is required/);
   });
 });

@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import config from "../../config.ts";
-import { errorMessage, present, type RepoManifest, type RepoProfile } from "../types.ts";
+import type { RepoManifest, RepoProfile } from "../manifest.ts";
+import { errorMessage, present } from "../util.ts";
 import { writeRunnerBundle } from "./runner-bundle.ts";
 import {
   REPO_ROOT,

@@ -2,7 +2,9 @@ import { spawnSync } from "node:child_process";
 import { rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { InvestigationResult, PROVIDER_KEY_ENV, providerApiKey, RunnerEvent } from "../src/types.ts";
+import { InvestigationResult } from "../src/investigation.ts";
+import { RunnerEvent } from "../src/runner/protocol.ts";
+import { PROVIDER_KEY_ENV, providerApiKey } from "../src/runner/providers.ts";
 import { buildRunner, makeFixture, makeInput, parseEvents } from "./helpers.ts";
 
 const provider = process.env.LIVE_MODEL_PROVIDER;

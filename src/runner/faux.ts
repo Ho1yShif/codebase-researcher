@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { RunnerInput } from "../types.ts";
+import type { RunnerInput } from "./protocol.ts";
 import {
   type FauxResponseStep,
   type MutableModels,
@@ -10,7 +10,7 @@ import {
   fauxText,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import type { Model } from "./main.ts";
+import type { Model } from "./model.ts";
 import { SUBMIT_TOOL } from "./submit.ts";
 
 export const FAUX_MODEL = "faux";

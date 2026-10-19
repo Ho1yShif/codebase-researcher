@@ -1,36 +1,52 @@
 import { describe, expect, it } from "vitest";
 import { refreshSnapshot } from "../src/cron.ts";
+import { createLog } from "../src/log.ts";
 
 const SNAPSHOT_NAME = "codebase-researcher-corpus";
 
+function capture() {
+  const lines: Record<string, unknown>[] = [];
+  return { lines, log: createLog({}, (l) => void lines.push(JSON.parse(l))) };
+}
+
 describe("refreshSnapshot", () => {
-  it("reports the built snapshot", async () => {
-    const result = await refreshSnapshot({ snapshotName: SNAPSHOT_NAME, rebuild: async () => ({ id: "snp-1", repos: 3 }), log: () => {} });
-    expect(result).toMatchObject({
-      event: "snapshot_refresh",
-      ok: true,
-      snapshot_id: "snp-1",
-      snapshot_name: SNAPSHOT_NAME,
-      repos: 3,
-    });
-    expect(result.duration_ms).toBeGreaterThanOrEqual(0);
+  it("logs one info snapshot_refresh line with the built snapshot", async () => {
+    const { lines, log } = capture();
+    const result = await refreshSnapshot({ snapshotName: SNAPSHOT_NAME, rebuild: async () => ({ id: "snp-1", repos: 3 }), log });
+
+    expect(result).toMatchObject({ ok: true, snapshot_id: "snp-1", repos: 3 });
+    expect(lines).toEqual([
+      expect.objectContaining({
+        level: "info",
+        event: "snapshot_refresh",
+        ok: true,
+        snapshot_id: "snp-1",
+        snapshot_name: SNAPSHOT_NAME,
+        repos: 3,
+        duration_ms: expect.any(Number),
+      }),
+    ]);
   });
 
-  it("returns ok: false on build failure without throwing", async () => {
-    const result = await refreshSnapshot({
-      snapshotName: SNAPSHOT_NAME,
-      rebuild: async () => {
-        throw new Error("build failed");
-      },
-      log: () => {},
-    });
-    expect(result).toMatchObject({ ok: false, snapshot_id: null, repos: 0, error: "build failed" });
-  });
+  it("logs one error snapshot_refresh line with the error, without throwing, when the rebuild fails", async () => {
+    const { lines, log } = capture();
+    const rebuild = async (): Promise<never> => {
+      throw new Error("clone failed");
+    };
+    const result = await refreshSnapshot({ snapshotName: SNAPSHOT_NAME, rebuild, log });
 
-  it("emits exactly one JSON log line", async () => {
-    const lines: string[] = [];
-    await refreshSnapshot({ snapshotName: SNAPSHOT_NAME, rebuild: async () => ({ id: "snp-1", repos: 1 }), log: (l) => lines.push(l) });
-    expect(lines).toHaveLength(1);
-    expect(JSON.parse(lines[0]!)).toMatchObject({ event: "snapshot_refresh", ok: true, snapshot_name: SNAPSHOT_NAME, repos: 1 });
+    expect(result).toMatchObject({ ok: false });
+    expect(lines).toEqual([
+      expect.objectContaining({
+        level: "error",
+        event: "snapshot_refresh",
+        ok: false,
+        snapshot_id: null,
+        snapshot_name: SNAPSHOT_NAME,
+        repos: 0,
+        error: "clone failed",
+        duration_ms: expect.any(Number),
+      }),
+    ]);
   });
 });

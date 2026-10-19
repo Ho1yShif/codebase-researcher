@@ -5,10 +5,11 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { ClientError, SandboxSnapshotNotFoundError } from "@renderinc/sdk";
 import type { SandboxSnapshot } from "@renderinc/sdk/experimental";
 import { create as createTar } from "tar";
-import { errorMessage, type RepoManifest, type RepoProfile } from "../../types.ts";
+import type { RepoManifest, RepoProfile } from "../../manifest.ts";
+import { errorMessage } from "../../util.ts";
 import { git, shq } from "../interface.ts";
 import { bundleRunner } from "../runner-bundle.ts";
-import { type SandboxApi, type SandboxClient, warn } from "./client.ts";
+import type { SandboxApi, SandboxClient } from "./client.ts";
 import type { RenderConfig } from "./config.ts";
 import { SANDBOX_APP, SANDBOX_REPOS, SANDBOX_ROOT, SANDBOX_RUN_AS, SANDBOX_SCRATCH, verifySandbox, wirePolicy } from "./sandbox.ts";
 
@@ -24,8 +25,6 @@ export async function rebuildSnapshot(
   await pruneSnapshots(client, built, opts.snapshotName, opts.keep);
   return { id: built.id, repos: heads.length };
 }
-
-// ── Heads ───────────────────────────────────────────────────────────────
 
 /** Resolves the current default-branch (or configured branch) commit of each repo with `git ls-remote`. */
 export async function resolveHeads(profile: RepoProfile, hostCreds: RenderConfig["hostCredentials"]): Promise<RepoManifest["repos"]> {
@@ -73,19 +72,6 @@ export function parseLsRemote(out: string, branch?: string): { branch: string; c
   return resolved && commit ? { branch: resolved, commit } : null;
 }
 
-// ── Build ───────────────────────────────────────────────────────────────
-//
-// Each step is a direct Sandbox API call (exec / upload) in an allow-all builder sandbox:
-//
-//   1. Upload sandbox-runtime/ and the runner bundle to a staging dir
-//   2. Install tools (git, node, ripgrep) via install-tools.sh
-//   3. Detect node path and privilege-drop tool, create runner user, write env
-//   4. Set permissions, run the runner's self-test
-//   5. Upload per-host credentials, clone each repo, scrub credentials (build/ scripts)
-//   6. Upload the manifest
-//   7. Lockdown (chown root, chmod read-only, execute-only node), delete the staging dir
-//   8. verify.sh, then snapshot
-
 const STAGE = "/tmp/researcher-stage";
 const STAGE_CREDS = `${STAGE}/creds`;
 const SAFE_REF = /^\w[\w./-]*$/;
@@ -97,7 +83,19 @@ export const RUNTIME_SCRIPTS = ["install-tools.sh", "as-runner.sh", "run-investi
 /** Builder-only: they stay in the staging dir, which is deleted before the snapshot. */
 export const BUILD_SCRIPTS = ["build/git-credential-staged.sh", "build/scrub-credentials.sh"] as const;
 
-/** Builds one named snapshot containing the runner and exactly these repository heads. */
+/**
+ * Builds one named snapshot containing the runner and exactly these repository heads. Each step is a
+ * direct Sandbox API call (exec / upload) in an allow-all builder sandbox:
+ *
+ *   1. Upload sandbox-runtime/ and the runner bundle to a staging dir
+ *   2. Install tools (git, node, ripgrep) via install-tools.sh
+ *   3. Detect node path and privilege-drop tool, create runner user, write env
+ *   4. Set permissions, run the runner's self-test
+ *   5. Upload per-host credentials, clone each repo, scrub credentials (build/ scripts)
+ *   6. Upload the manifest
+ *   7. Lockdown (chown root, chmod read-only, execute-only node), delete the staging dir
+ *   8. verify.sh, then snapshot
+ */
 export async function buildSnapshot(
   client: SandboxClient,
   { profile, heads, snapshotName }: { profile: RepoProfile; heads: RepoManifest["repos"]; snapshotName: string },
@@ -110,19 +108,17 @@ export async function buildSnapshot(
   const prepare = { timeoutMs: t.prepareTimeoutMs };
   const boot = { timeoutMs: t.bootTimeoutMs };
   const { id } = await client.call(() =>
-    client.api.create({ timeoutSeconds: client.cfg.builderTimeoutSeconds, networkPolicy: wirePolicy({ default: "allow-all" }) }),
+    client.api.create({ timeoutSeconds: client.cfg.builderTimeoutSeconds, networkPolicy: wirePolicy({ type: "allow-all" }) }),
   );
   try {
     await client.waitRunning(id);
 
-    // ── Stage: upload runtime files ──────────────────────────────────
     await client.check(id, `mkdir -p -m 700 ${STAGE}`, { ...boot, waitReady: true });
     // Uploaded as an opaque .tgz and extracted in the sandbox: the upload endpoint rejects an
     // uncompressed tar of the bundled runner's JavaScript, and doesn't accept application/gzip.
     await client.upload(id, `${STAGE}/stage.tgz`, await stageArchive(client.cfg));
     await client.check(id, `tar -xzf ${STAGE}/stage.tgz -C ${STAGE} && rm ${STAGE}/stage.tgz`, boot);
 
-    // ── Setup: directories, tools, environment ──────────────────────
     await client.check(id,
       `mkdir -p ${SANDBOX_APP}/runner ${SANDBOX_REPOS} ${SANDBOX_SCRATCH}` +
       ` && cp ${STAGE}/*.sh ${SANDBOX_APP}/` +
@@ -135,7 +131,6 @@ export async function buildSnapshot(
     await client.upload(id, `${SANDBOX_APP}/env`, envFileContent(env.nodePath, env.dropTool));
     await client.upload(id, `${SANDBOX_APP}/gitconfig`, SANDBOX_GITCONFIG);
 
-    // ── Runner: set permissions, self-test ──────────────────────────
     // The self-test executes third-party code (the bundled packages); credentials are
     // uploaded only after this step succeeds.
     await client.check(id, [
@@ -144,7 +139,6 @@ export async function buildSnapshot(
       `timeout 120 ${SANDBOX_APP}/as-runner.sh ${shq(env.nodePath)} ${SANDBOX_APP}/runner/runner.mjs --self-test`,
     ].join(" && "), prepare);
 
-    // ── Clone: upload credentials, clone each repo, then scrub ──────
     for (const [host, { username, token }] of Object.entries(client.cfg.hostCredentials)) {
       await client.upload(id, `${STAGE_CREDS}/${host}`, `${username}\n${token}`);
     }
@@ -156,7 +150,6 @@ export async function buildSnapshot(
     const scrub = await client.exec(id, `bash ${STAGE}/build/scrub-credentials.sh ${STAGE_CREDS} ${SANDBOX_REPOS}`, prepare);
     if (scrub.exitCode !== 0) throw new Error(`credential scrub failed: ${(scrub.stderr || scrub.stdout).trim().slice(-2000)}`);
 
-    // ── Finalize: manifest, lockdown, verify, snapshot ──────────────
     const manifest: RepoManifest = {
       profile: profile.name,
       created_at: new Date().toISOString(),
@@ -165,7 +158,8 @@ export async function buildSnapshot(
     await client.upload(id, `${SANDBOX_APP}/manifest.json`, JSON.stringify(manifest, null, 2));
     await client.check(id, lockdownCommand(env.nodePath), prepare);
     await client.check(id, `rm -rf ${STAGE}`, prepare);
-    await verifySandbox(client, id);
+    const info = await verifySandbox(client, id);
+    if (!info.runnerNonDumpable) throw new Error(`could not confirm the runner is non-dumpable in builder ${id}; every restore would refuse this snapshot`);
 
     const snap = await createSnapshot(client, id, snapshotName);
     return { id: snap.id, sandboxGroupId: snap.sandboxGroupId };
@@ -271,8 +265,6 @@ async function stageArchive({ sandboxDir }: RenderConfig): Promise<Buffer> {
   }
 }
 
-// ── Prune ───────────────────────────────────────────────────────────────
-
 /** Deletes older available/failed snapshots with this name, keeping the newest `keep`. Logs instead of throwing. */
 export async function pruneSnapshots(client: SandboxClient, { sandboxGroupId }: BuiltSnapshot, snapshotName: string, keep: number): Promise<void> {
   try {
@@ -296,6 +288,6 @@ export async function pruneSnapshots(client: SandboxClient, { sandboxGroupId }: 
       }
     }
   } catch (err) {
-    warn("snapshot prune failed", { snapshotName, error: errorMessage(err) });
+    client.log.warn("snapshot prune failed", { snapshot_name: snapshotName, err });
   }
 }

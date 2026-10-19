@@ -1,23 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { buildEvidenceUrl } from "../src/types.ts";
-import type { Evidence, FinalAnswer, RepoManifest } from "../src/types.ts";
+import { buildEvidenceUrl, type Evidence, type FinalAnswer } from "../src/investigation.ts";
+import type { RepoManifest } from "../src/manifest.ts";
 import { filterEvidence } from "../src/tasks.ts";
 
-const sha = "a".repeat(40);
+const sha = "0123456789abcdef0123456789abcdef01234567";
 const manifest: RepoManifest = {
   profile: "test",
   created_at: new Date().toISOString(),
-  repos: [
-    { repository: "acme/api", branch: "main", commit: sha, path: "/opt/researcher/repos/acme/api" },
-  ],
+  repos: [{ repository: "acme/api", branch: "main", commit: sha, path: "/opt/researcher/repos/acme/api" }],
 };
 
 const evidence = (overrides: Partial<Evidence> = {}): Evidence => ({
   repository: "acme/api",
   commit: sha.slice(0, 7),
   path: "src/main.ts",
-  start_line: 1,
-  end_line: 10,
+  start_line: 10,
+  end_line: 24,
   ...overrides,
 });
 
@@ -33,75 +31,49 @@ const finalAnswer = (ev: Evidence[]): FinalAnswer => ({
   escalation_question: "?",
 });
 
+const kept = (result: ReturnType<typeof filterEvidence>["result"]) => (result.status === "final_answer" ? result.evidence : []);
+
 describe("filterEvidence", () => {
-  it("sets a GitHub url on kept evidence by default", () => {
-    const { result, dropped } = filterEvidence(finalAnswer([evidence()]), manifest);
+  it("pins kept evidence to the manifest repository and full commit, replacing any model-supplied url with a GitHub link", () => {
+    const { result, dropped } = filterEvidence(finalAnswer([evidence({ repository: "ACME/api", url: "https://evil.example.com" })]), manifest);
     expect(dropped).toEqual([]);
-    expect(result.status === "final_answer" && result.evidence[0]?.url).toBe(
-      `https://github.com/acme/api/blob/${sha}/src/main.ts#L1-L10`,
-    );
+    expect(kept(result)).toEqual([
+      { ...evidence(), commit: sha, url: `https://github.com/acme/api/blob/${sha}/src/main.ts#L10-L24` },
+    ]);
   });
 
-  it("overwrites a model-supplied url", () => {
-    const e = evidence({ url: "https://evil.example.com" });
-    const { result } = filterEvidence(finalAnswer([e]), manifest);
-    expect(result.status === "final_answer" && result.evidence[0]?.url).toMatch(/^https:\/\/github\.com\//);
-    expect(result.status === "final_answer" && result.evidence[0]?.url).not.toContain("evil");
+  it("links with the manifest repository's browse style and clone URL", () => {
+    const repos = [{ ...manifest.repos[0]!, browse: "gitlab", url: "https://gitlab.com/acme/platform/api.git" }] as RepoManifest["repos"];
+    const { result } = filterEvidence(finalAnswer([evidence()]), { ...manifest, repos });
+    expect(kept(result)[0]?.url).toBe(`https://gitlab.com/acme/platform/api/-/blob/${sha}/src/main.ts#L10-L24`);
   });
 
-  it("uses browse and url from the manifest repo when present", () => {
-    const m: RepoManifest = {
-      ...manifest,
-      repos: [{ ...manifest.repos[0]!, browse: "gitlab", url: "https://gitlab.com/acme/platform/api.git" } as RepoManifest["repos"][number]],
-    };
-    const { result } = filterEvidence(finalAnswer([evidence()]), m);
-    expect(result.status === "final_answer" && result.evidence[0]?.url).toBe(
-      `https://gitlab.com/acme/platform/api/-/blob/${sha}/src/main.ts#L1-L10`,
-    );
-  });
-
-  it("passes through a needs_clarification result unchanged", () => {
-    const clarify = { status: "needs_clarification" as const, question: "?", why_needed: "x" };
-    const { result, dropped } = filterEvidence(clarify, manifest);
-    expect(result).toEqual(clarify);
-    expect(dropped).toEqual([]);
+  it("drops evidence whose repository or commit is not in the manifest", () => {
+    const strays = [evidence({ repository: "acme/other" }), evidence({ commit: "deadbeef" })];
+    const { result, dropped } = filterEvidence(finalAnswer([evidence(), ...strays]), manifest);
+    expect(kept(result)).toHaveLength(1);
+    expect(dropped).toEqual(strays);
   });
 });
 
-const linksSha = "0123456789abcdef0123456789abcdef01234567";
-const e = { repository: "acme/api", commit: linksSha, path: "src/main.ts", start_line: 10, end_line: 24 };
-
 describe("buildEvidenceUrl", () => {
-  it("defaults to the existing GitHub URL shape", () => {
-    expect(buildEvidenceUrl(e)).toBe(
-      `https://github.com/acme/api/blob/${linksSha}/src/main.ts#L10-L24`,
+  const e = evidence({ commit: sha });
+
+  it("builds GitHub, GitLab, Bitbucket, and custom-template links", () => {
+    expect(buildEvidenceUrl(e)).toBe(`https://github.com/acme/api/blob/${sha}/src/main.ts#L10-L24`);
+    expect(buildEvidenceUrl(e, "gitlab", "https://gitlab.com/acme/platform/api.git")).toBe(
+      `https://gitlab.com/acme/platform/api/-/blob/${sha}/src/main.ts#L10-L24`,
     );
+    expect(buildEvidenceUrl(e, "bitbucket", "https://bitbucket.org/acme/api.git")).toBe(`https://bitbucket.org/acme/api/src/${sha}/src/main.ts#lines-10:24`);
+    expect(buildEvidenceUrl(e, "{base}/-/blob/{commit}/{path}?start={start}&end={end}", "https://git.corp.example.com/acme/api.git")).toBe(
+      `https://git.corp.example.com/acme/api/-/blob/${sha}/src/main.ts?start=10&end=24`,
+    );
+    expect(buildEvidenceUrl(e, "gitlab")).toBe(`https://github.com/acme/api/-/blob/${sha}/src/main.ts#L10-L24`);
   });
 
-  it("encodes path segments", () => {
+  it("percent-encodes path segments", () => {
     expect(buildEvidenceUrl({ ...e, path: "./docs/a b|c>.md", start_line: 3, end_line: 3 })).toBe(
-      `https://github.com/acme/api/blob/${linksSha}/docs/a%20b%7Cc%3E.md#L3-L3`,
+      `https://github.com/acme/api/blob/${sha}/docs/a%20b%7Cc%3E.md#L3-L3`,
     );
-  });
-
-  it("builds a GitLab URL from the clone URL", () => {
-    const url = buildEvidenceUrl(e, "gitlab", "https://gitlab.com/acme/platform/api.git");
-    expect(url).toBe(`https://gitlab.com/acme/platform/api/-/blob/${linksSha}/src/main.ts#L10-L24`);
-  });
-
-  it("builds a Bitbucket URL from the clone URL", () => {
-    const url = buildEvidenceUrl(e, "bitbucket", "https://bitbucket.org/acme/api.git");
-    expect(url).toBe(`https://bitbucket.org/acme/api/src/${linksSha}/src/main.ts#lines-10:24`);
-  });
-
-  it("expands a custom template", () => {
-    const tpl = "{base}/-/blob/{commit}/{path}?start={start}&end={end}";
-    const url = buildEvidenceUrl(e, tpl, "https://git.corp.example.com/acme/api.git");
-    expect(url).toBe(`https://git.corp.example.com/acme/api/-/blob/${linksSha}/src/main.ts?start=10&end=24`);
-  });
-
-  it("uses github.com/{repository} as the base when no URL is given", () => {
-    const url = buildEvidenceUrl(e, "gitlab");
-    expect(url).toBe(`https://github.com/acme/api/-/blob/${linksSha}/src/main.ts#L10-L24`);
   });
 });

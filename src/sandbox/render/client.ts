@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { ClientError, Render, ServerError } from "@renderinc/sdk";
 import type { SandboxesClient, SandboxUploadContentType } from "@renderinc/sdk/experimental";
-import { errorMessage } from "../../types.ts";
+import type { Log } from "../../log.ts";
 import type { RenderConfig } from "./config.ts";
 
 /** The subset of the SDK's SandboxesClient used here; tests substitute a fake. */
@@ -54,15 +54,16 @@ export class SandboxClient {
   constructor(
     readonly api: SandboxApi,
     readonly cfg: RenderConfig,
+    readonly log: Log,
     timings: Partial<RenderTimings> = {},
   ) {
     this.t = { ...DEFAULT_TIMINGS, ...timings };
   }
 
-  static fromConfig(cfg: RenderConfig): SandboxClient {
+  static fromConfig(cfg: RenderConfig, log: Log): SandboxClient {
     // useLocalDev: false keeps sandbox calls on api.render.com even when RENDER_USE_LOCAL_DEV is set for workflows.
     const render = new Render({ useLocalDev: false, token: cfg.apiKey, ownerId: cfg.workspaceId });
-    return new SandboxClient(render.experimental.sandboxes, cfg);
+    return new SandboxClient(render.experimental.sandboxes, cfg, log);
   }
 
   /** Paces every API call and retries the given statuses (429 by default, which is never processed server-side). */
@@ -88,7 +89,7 @@ export class SandboxClient {
     const timeout = AbortSignal.timeout(opts.timeoutMs);
     const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
     const retry = opts.waitReady
-      ? { retryOn: READY_RETRY, attempts: Math.ceil(this.t.bootTimeoutMs / Math.max(this.t.pollMs, 1)) }
+      ? { retryOn: READY_RETRY, attempts: Math.ceil(opts.timeoutMs / Math.max(this.t.pollMs, 1)) }
       : { retryOn: TRANSIENT };
     let stdout = "";
     let stderr = "";
@@ -126,14 +127,14 @@ export class SandboxClient {
     return file.data.toString("utf8");
   }
 
-  async waitRunning(id: string): Promise<void> {
-    const until = Date.now() + this.t.bootTimeoutMs;
+  async waitRunning(id: string, { timeoutMs = this.t.bootTimeoutMs, signal }: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<void> {
+    const until = Date.now() + timeoutMs;
     for (;;) {
-      const { status } = await this.call(() => this.api.get(id), { retryOn: READY_RETRY });
+      const { status } = await this.call(() => this.api.get(id), { retryOn: READY_RETRY, signal });
       if (status === "running") return;
       if (status === "errored" || status === "terminated") throw new Error(`sandbox ${id} is ${status}`);
-      if (Date.now() > until) throw new Error(`sandbox ${id} still ${status} after ${this.t.bootTimeoutMs}ms`);
-      await sleep(this.t.pollMs);
+      if (Date.now() > until) throw new Error(`sandbox ${id} still ${status} after ${timeoutMs}ms`);
+      await sleep(this.t.pollMs, undefined, { signal });
     }
   }
 
@@ -148,10 +149,6 @@ export class SandboxClient {
   }
 
   async terminateQuietly(id: string): Promise<void> {
-    await this.terminate(id).catch((err) => warn("terminate failed", { sandbox: id, error: errorMessage(err) }));
+    await this.terminate(id).catch((err: unknown) => this.log.warn("could not terminate sandbox", { sandbox_id: id, err }));
   }
-}
-
-export function warn(message: string, fields: Record<string, unknown>): void {
-  console.error(JSON.stringify({ level: "warn", component: "render-sandbox", message, ...fields }));
 }

@@ -20,7 +20,7 @@ projects:
             startCommand: pnpm start:api
             healthCheckPath: /healthz
             buildFilter:
-              paths: [src/api.ts, src/slack.ts, src/types.ts, src/callback.ts, config.ts, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version, tsconfig.json]
+              paths: [src/api.ts, src/slack/**, src/question.ts, src/investigation.ts, src/bot-config.ts, src/manifest.ts, src/callback.ts, src/log.ts, src/util.ts, config.ts, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version, tsconfig.json]
             envVars:
               - key: RENDER_API_KEY
                 sync: false
