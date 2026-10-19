@@ -2,13 +2,14 @@ import { describe, expect, it } from "vitest";
 import { ClientError } from "@renderinc/sdk";
 import { createApp, loadEnv, toQuestionId, type AppDeps, type GetTaskRun } from "../src/api.ts";
 import { signCallback, verifyCallback } from "../src/callback.ts";
-import type { StartQuestion } from "../src/types.ts";
+import { createLog } from "../src/log.ts";
+import type { StartQuestion } from "../src/question.ts";
 
 const TOKEN = "test-api-token-1234";
 
 function harness(overrides: Partial<AppDeps> = {}) {
   const started: Array<{ input: unknown; key?: string }> = [];
-  const logs: string[] = [];
+  const logs: Record<string, unknown>[] = [];
 
   const startQuestion: StartQuestion = async (input, opts) => {
     started.push({ input, key: opts.idempotencyKey });
@@ -22,7 +23,7 @@ function harness(overrides: Partial<AppDeps> = {}) {
     startQuestion,
     getTaskRun,
     isLocalDev: false,
-    log: (l) => logs.push(l),
+    log: createLog({}, (line) => void logs.push(JSON.parse(line))),
     ...overrides,
   };
   const app = createApp(deps);
@@ -133,7 +134,7 @@ describe("POST /v1/questions validation", () => {
 
 describe("POST /v1/questions", () => {
   it("passes the idempotency key", async () => {
-    const { app, started } = harness();
+    const { app, started, logs } = harness();
     const res = await app.request("/v1/questions", {
       method: "POST",
       headers: { "content-type": "application/json", ...AUTH, "Idempotency-Key": "idem-1" },
@@ -143,6 +144,7 @@ describe("POST /v1/questions", () => {
     const body = await res.json() as { id: string };
     expect(body).toEqual({ id: toQuestionId(TOKEN, "run-123") });
     expect(started[0]?.key).toBe("idem-1");
+    expect(logs).toContainEqual(expect.objectContaining({ level: "info", event: "task_started", run_id: "run-123" }));
   });
 
   it("returns 500 when startQuestion throws", async () => {
@@ -154,7 +156,7 @@ describe("POST /v1/questions", () => {
       body: JSON.stringify(validBody()),
     });
     expect(res.status).toBe(500);
-    expect(logs.some((l) => l.includes("request_failed"))).toBe(true);
+    expect(logs).toContainEqual(expect.objectContaining({ level: "error", event: "request_failed", error: "boom" }));
   });
 
   it("returns 400 for malformed JSON", async () => {
@@ -234,8 +236,6 @@ describe("healthz", () => {
     expect(await res.text()).toBe("ok");
   });
 });
-
-// ── Callback signing tests ──────────────────────────────────────────────
 
 describe("signCallback and verifyCallback", () => {
   const secret = "test-callback-secret-1234567890";

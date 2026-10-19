@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildEvidenceUrl } from "../src/types.ts";
-import type { Evidence, FinalAnswer, RepoManifest } from "../src/types.ts";
+import { buildEvidenceUrl, type Evidence, type FinalAnswer } from "../src/investigation.ts";
+import type { RepoManifest } from "../src/manifest.ts";
 import { filterEvidence } from "../src/tasks.ts";
 
 const sha = "a".repeat(40);

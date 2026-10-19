@@ -32,7 +32,7 @@ describe("bundled runner (runner.mjs)", { timeout: 30_000 }, () => {
       ["ls", false],
       ["bash", false],
       ["read", false],
-      ["submit_investigation", false],
+      [SUBMIT, false],
     ]);
     expect(toolResults(events)[1]?.output_preview).toContain(fx.commit);
     expect(events.some((e) => e.type === "usage")).toBe(true);
@@ -300,7 +300,7 @@ describe("bash tool", { timeout: 30_000 }, () => {
       call("bash", { command: "git checkout -b evil" }),
       call("bash", { command: "curl -s https://example.com" }),
       call("bash", { command: `git -C ${REPO} log -1 --format=%H` }),
-      call("submit_investigation", CLARIFY),
+      call(SUBMIT, CLARIFY),
     ]);
     const [checkout, curl, log] = toolResults(events);
     expect(checkout).toMatchObject({ is_error: true, output_preview: expect.stringContaining("git checkout is not allowed") });
@@ -472,7 +472,11 @@ const RUNNER_PACKAGES = new Set([
   "@earendil-works/pi-agent-core",
   "@earendil-works/pi-ai",
   "typebox",
+  "zod",
 ]);
+
+/** Modules in src/ shared by the runner and the host; they may import only zod and each other. */
+const SHARED_MODULES = new Set(["investigation.ts", "manifest.ts", "util.ts"]);
 
 function extractImports(code: string): string[] {
   const imports: string[] = [];
@@ -483,23 +487,20 @@ function extractImports(code: string): string[] {
 }
 
 describe("runner import boundary", () => {
-  it("files under src/runner/ import only from src/runner/*, src/types.ts, Node built-ins, or the runner packages", () => {
-    const files = readdirSync(RUNNER_DIR).filter(f => f.endsWith(".ts") && !f.endsWith(".d.ts"));
+  const files = readdirSync(RUNNER_DIR).filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"));
+
+  it("files under src/runner/ import only from src/runner/*, the shared modules, Node built-ins, or the runner packages", () => {
     const violations: string[] = [];
 
     for (const file of files) {
       const code = readFileSync(join(RUNNER_DIR, file), "utf8");
       for (const spec of extractImports(code)) {
-        // Allow Node built-ins
-        if (spec.startsWith("node:")) continue;
-        // Allow relative runner imports
-        if (spec.startsWith("./") || spec.startsWith("../")) {
-          // Must be within runner/ or src/types.ts
-          if (spec.startsWith("./")) continue; // same directory
-          if (spec === "../types.ts") continue;
-          // Allow ?raw imports from outside (prompt.md)
-          if (spec.endsWith("?raw")) continue;
-          violations.push(`${file}: imports "${spec}" (outside runner/ and not src/types.ts)`);
+        if (spec.startsWith("node:") || spec.startsWith("./")) continue;
+        if (spec.startsWith("../") && SHARED_MODULES.has(spec.slice(3))) continue;
+        // ?raw imports are inlined as text, so the instance prompt.md may live outside src/runner/.
+        if (spec.endsWith("?raw")) continue;
+        if (spec.startsWith("../")) {
+          violations.push(`${file}: imports "${spec}" (outside runner/ and not a shared module)`);
           continue;
         }
         const pkg = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!;
@@ -509,5 +510,29 @@ describe("runner import boundary", () => {
     }
 
     expect(violations).toEqual([]);
+  });
+
+  it("shared modules import only zod and each other", () => {
+    const violations: string[] = [];
+    for (const file of SHARED_MODULES) {
+      for (const spec of extractImports(readFileSync(join(RUNNER_DIR, "..", file), "utf8"))) {
+        if (spec === "zod" || (spec.startsWith("./") && SHARED_MODULES.has(spec.slice(2)))) continue;
+        violations.push(`${file}: imports "${spec}"`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it("has no import cycles between src/runner/ modules", () => {
+    const deps = new Map(
+      files.map((f) => [f, extractImports(readFileSync(join(RUNNER_DIR, f), "utf8")).flatMap((s) => (/^\.\/[^/]+\.ts$/.test(s) ? [s.slice(2)] : []))]),
+    );
+    const cycles: string[] = [];
+    const visit = (file: string, path: string[]) => {
+      if (path.includes(file)) return void cycles.push([...path.slice(path.indexOf(file)), file].join(" -> "));
+      for (const dep of deps.get(file) ?? []) visit(dep, [...path, file]);
+    };
+    for (const file of files) visit(file, []);
+    expect(cycles).toEqual([]);
   });
 });

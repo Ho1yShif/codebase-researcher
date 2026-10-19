@@ -1,10 +1,15 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { parseSlackEvent, verifySlackSignature, escapeMrkdwn, truncate, evidenceUrl, formatReply, react, unreact, swapEyesForResult, postReply, findPostedReply, REPLY_EVENT_TYPE, fetchTranscript, compareTs, slackTsToIso, mountSlackRoutes, fitTranscript, type SlackDeps } from "../src/slack.ts";
+import { parseSlackEvent, verifySlackSignature } from "../src/slack/events.ts";
+import { react, unreact, swapEyesForResult, postReply, findPostedReply, REPLY_EVENT_TYPE } from "../src/slack/client.ts";
+import { fetchTranscript, compareTs, slackTsToIso, fitTranscript } from "../src/slack/transcript.ts";
+import { escapeMrkdwn, truncate, evidenceUrl, formatReply } from "../src/slack/format.ts";
+import { mountSlackRoutes, type SlackDeps } from "../src/slack/routes.ts";
 import { signCallback } from "../src/callback.ts";
-import { ApiTranscript, type Reply, type StartQuestion } from "../src/types.ts";
+import { createLog } from "../src/log.ts";
+import { ApiTranscript, type Reply, type StartQuestion } from "../src/question.ts";
 import { createHmac } from "node:crypto";
-import type { Evidence, FinalAnswer } from "../src/types.ts";
+import type { Evidence, FinalAnswer } from "../src/investigation.ts";
 import config from "../config.ts";
 import type { KnownBlock } from "@slack/types";
 import { createFakeSlack } from "./fakes.ts";
@@ -497,8 +502,6 @@ describe("slackTsToIso", () => {
   });
 });
 
-// ── Slack adapter tests ─────────────────────────────────────────────────
-
 const SLACK_SECRET = "e2e-signing-secret";
 const CALLBACK_KEY = "slack-callback-key-long-enough";
 
@@ -507,9 +510,13 @@ function slackSign(body: string, secret = SLACK_SECRET, timestamp = String(Math.
   return { "x-slack-request-timestamp": timestamp, "x-slack-signature": sig, "content-type": "application/json" };
 }
 
+type LogLine = Record<string, unknown>;
+const captureLog = (lines: LogLine[]) => createLog({}, (line) => void lines.push(JSON.parse(line)));
+
 function slackHarness() {
   const started: Array<{ input: unknown; key?: string }> = [];
-  const logs: string[] = [];
+  const logs: LogLine[] = [];
+  const log = captureLog(logs);
   const slack = createFakeSlack();
   const pending: Promise<void>[] = [];
   /** Waits for the work each acknowledged mention started. */
@@ -529,11 +536,10 @@ function slackHarness() {
     callbackKey: CALLBACK_KEY,
     publicUrl: "http://localhost:3000",
     slack,
-    log: (l) => logs.push(l),
     background: (work) => void pending.push(work),
   };
 
-  mountSlackRoutes(app, slackDeps, { startQuestion, log: (l) => logs.push(l) });
+  mountSlackRoutes(app, slackDeps, { startQuestion, log });
 
   return { app, started, logs, slack, slackDeps, settle };
 }
@@ -618,22 +624,23 @@ describe("Slack /slack/events", () => {
     const res = await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
     expect(res.status).toBe(200);
     expect(started).toEqual([]);
-    expect(logs.some((l) => l.includes('"mention_ignored"') && l.includes("C_OTHER"))).toBe(true);
+    expect(logs).toContainEqual(expect.objectContaining({ event: "mention_ignored", channel: "C_OTHER" }));
   });
 
   it("warns at startup when no channel is allowed", () => {
     const h = slackHarness();
-    const logs: string[] = [];
-    mountSlackRoutes(new Hono(), { ...h.slackDeps, allowedChannels: new Set(), log: (l) => logs.push(l) }, { startQuestion: async () => ({ id: "r" }), log: () => {} });
-    expect(logs.some((l) => l.includes('"slack_no_channels"'))).toBe(true);
-    expect(h.logs.some((l) => l.includes('"slack_no_channels"'))).toBe(false);
+    const logs: LogLine[] = [];
+    mountSlackRoutes(new Hono(), { ...h.slackDeps, allowedChannels: new Set() }, { startQuestion: async () => ({ id: "r" }), log: captureLog(logs) });
+    expect(logs).toContainEqual(expect.objectContaining({ level: "warn", event: "slack_no_channels" }));
+    expect(h.logs.some((l) => l.event === "slack_no_channels")).toBe(false);
   });
 
   it("says so in the thread when the question can't be started", async () => {
     const h = slackHarness();
     const failStart: StartQuestion = async () => { throw new Error("boom"); };
+    const logs: LogLine[] = [];
     const app = new Hono();
-    mountSlackRoutes(app, h.slackDeps, { startQuestion: failStart, log: () => {} });
+    mountSlackRoutes(app, h.slackDeps, { startQuestion: failStart, log: captureLog(logs) });
     const parent = h.slack.seed({ channel: "C0SUPPORT", ts: "1700000000.000001", user: "U1", text: "<@UBOT> hello" });
     const body = mentionBody();
     const res = await app.request("/slack/events", { method: "POST", headers: slackSign(body), body });
@@ -643,6 +650,7 @@ describe("Slack /slack/events", () => {
     expect(replies).toHaveLength(1);
     expect(replies[0]!.text).toContain("didn't accept the question");
     expect(parent.reactions).toEqual([{ name: "warning", user: "UBOT" }]);
+    expect(logs).toContainEqual(expect.objectContaining({ level: "error", event: "task_start_failed", event_id: "Ev123ABC", error: "boom" }));
   });
 
   it("handles a Slack retry like the original, keyed on the event id", async () => {
@@ -653,7 +661,7 @@ describe("Slack /slack/events", () => {
     await app.request("/slack/events", { method: "POST", headers: { ...slackSign(body), "x-slack-retry-num": "1" }, body });
     await settle();
     expect(started.map((s) => s.key)).toEqual(["Ev123ABC", "Ev123ABC"]);
-    expect(logs.some((l) => l.includes('"slack_retry"'))).toBe(true);
+    expect(logs).toContainEqual(expect.objectContaining({ event: "slack_retry", event_id: "Ev123ABC", retry_num: 1 }));
   });
 });
 

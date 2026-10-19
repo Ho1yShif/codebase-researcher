@@ -2,20 +2,14 @@ import { z } from "zod";
 import {
   AnswerQuestionInput,
   MESSAGE_MAX_CHARS,
-  RUNNER_EXIT,
   TRANSCRIPT_MAX_MESSAGES,
-  RunnerInput,
-  buildEvidenceUrl,
   toInternalTranscript,
   type Callback,
-  type InvestigationResult,
-  type Evidence,
   type Reply,
-  type RepoManifest,
-  type RunnerEvent,
-  type Transcript,
-  type Usage,
-} from "./types.ts";
+} from "./question.ts";
+import { buildEvidenceUrl, type Evidence, type InvestigationResult, type Transcript } from "./investigation.ts";
+import type { RepoManifest } from "./manifest.ts";
+import { RUNNER_EXIT, RunnerInput, type RunnerEvent, type Usage } from "./runner/protocol.ts";
 import { SnapshotUnavailableError, type OpenSandbox, type RunInvestigationResult, type Sandbox } from "./sandbox/index.ts";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import { signCallback } from "./callback.ts";
@@ -270,7 +264,6 @@ export async function deliverCallback(input: DeliverInput): Promise<void> {
 
 export type InvestigateDeps = {
   config: Config;
-  snapshotName: string;
   log: Log;
   configureSandboxes: (allowedDomain: string) => Promise<OpenSandbox>;
 };
@@ -279,7 +272,7 @@ export async function investigateTask(
   deps: InvestigateDeps,
   input: InvestigateInput,
 ): Promise<InvestigateResult> {
-  const { config, snapshotName, log } = deps;
+  const { config, log } = deps;
 
   const record = getBuiltinModel(config.modelProvider as never, config.model as never);
   if (!record) {
@@ -298,7 +291,7 @@ export async function investigateTask(
 
   let sandbox: Sandbox;
   try {
-    sandbox = await openSandbox(snapshotName);
+    sandbox = await openSandbox(config.snapshotName, { timeoutMs: config.sandboxProvisionTimeoutMs });
   } catch (err) {
     if (err instanceof SnapshotUnavailableError) return { kind: "failed", code: err.notReady ? "snapshot_not_ready" : "no_snapshot" };
     throw err;
@@ -336,7 +329,10 @@ export async function investigateTask(
       capture,
       { elapsedMs: Date.now() - startedAt, agentTimeoutMs: config.agentTimeoutMs },
     );
-    if (verdict.kind === "failed") return { kind: "failed", code: verdict.code };
+    if (verdict.kind === "failed") {
+      log.warn("investigation failed", { event: "investigation_failed", code: verdict.code, message: redact(verdict.message) });
+      return { kind: "failed", code: verdict.code };
+    }
 
     const { result, dropped } = filterEvidence(verdict.value, runnerInput.manifest);
     if (dropped.length > 0) log.warn("dropped evidence not in the sandbox manifest", { dropped });

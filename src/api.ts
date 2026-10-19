@@ -1,21 +1,19 @@
-import {
-  ApiTranscript,
-  QuestionMetadata,
-  present,
-  type Reply,
-  type StartQuestion,
-} from "./types.ts";
+import { ApiTranscript, QuestionMetadata, type Reply, type StartQuestion } from "./question.ts";
+import { present } from "./util.ts";
 import { safeEqual } from "./callback.ts";
-import { createSlack, mountSlackRoutes } from "./slack.ts";
+import { createLog, type Log } from "./log.ts";
+import { createSlack } from "./slack/client.ts";
+import { mountSlackRoutes } from "./slack/routes.ts";
+import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { bearerAuth } from "hono/bearer-auth";
 import { HTTPException } from "hono/http-exception";
 import { validator } from "hono/validator";
-import { ClientError } from "@renderinc/sdk";
+import { ClientError, Render } from "@renderinc/sdk";
 import { z } from "zod";
 import { createHmac } from "node:crypto";
-
-// ── Types shared with tests ─────────────────────────────────────────────
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 export type GetTaskRun = (id: string) => Promise<{ status: string; results: unknown[]; error?: string }>;
 
@@ -24,12 +22,8 @@ export type AppDeps = {
   startQuestion: StartQuestion;
   getTaskRun: GetTaskRun;
   isLocalDev: boolean;
-  log: (line: string) => void;
+  log: Log;
 };
-
-
-
-// ── Question ids ────────────────────────────────────────────────────────
 
 /**
  * A question id is `<task run id>.<HMAC>`, so `GET` only reads runs this API started; the API token alone
@@ -46,8 +40,6 @@ export function fromQuestionId(apiToken: string, questionId: string): string | n
   const runId = questionId.slice(0, dot);
   return safeEqual(questionId.slice(dot + 1), questionIdMac(apiToken, runId)) ? runId : null;
 }
-
-// ── App factory ─────────────────────────────────────────────────────────
 
 const postBody = (isLocalDev: boolean) =>
   z.object({
@@ -69,21 +61,19 @@ export function createApp(deps: AppDeps) {
 
   app.onError((err, c) => {
     if (err instanceof HTTPException) return err.getResponse();
-    deps.log(JSON.stringify({
+    deps.log.error("request failed", {
       event: "request_failed",
       method: c.req.method,
       path: c.req.path,
       error: err.message,
-    }));
+    });
     return c.text("internal error", 500);
   });
 
   app.get("/healthz", (c) => c.text("ok"));
 
-  // ── Bearer auth for /v1/* ─────────────────────────────────────────
   app.use("/v1/*", bearerAuth({ token: deps.apiToken }));
 
-  // ── POST /v1/questions ────────────────────────────────────────────
   app.post(
     "/v1/questions",
     validator("json", (value, c) => {
@@ -95,12 +85,11 @@ export function createApp(deps: AppDeps) {
         idempotencyKey: c.req.header("idempotency-key"),
         signal: AbortSignal.timeout(5000),
       });
-      deps.log(JSON.stringify({ event: "task_started", run_id: run.id }));
+      deps.log.info("task started", { event: "task_started", run_id: run.id });
       return c.json({ id: toQuestionId(deps.apiToken, run.id) }, 202);
     },
   );
 
-  // ── GET /v1/questions/:id ─────────────────────────────────────────
   app.get("/v1/questions/:id", async (c) => {
     const id = c.req.param("id");
     const runId = fromQuestionId(deps.apiToken, id);
@@ -133,8 +122,6 @@ export function createApp(deps: AppDeps) {
 
   return app;
 }
-
-// ── Env parsing ─────────────────────────────────────────────────────────
 
 const Env = z
   .object({
@@ -188,13 +175,7 @@ export function loadEnv(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   return Env.parse(present(env));
 }
 
-// ── Server (runs only when executed directly) ────────────────────────────
-
-import { serve } from "@hono/node-server";
-import { Render } from "@renderinc/sdk";
-import { realpathSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-
+// Starts the server only when run directly, not when tests import this module.
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const env = loadEnv();
 
@@ -215,7 +196,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
 
   const getTaskRun: GetTaskRun = (id) => render.workflows.getTaskRun(id);
 
-  const log = (line: string) => void process.stdout.write(`${line}\n`);
+  const log = createLog();
 
   const app = createApp({
     apiToken: env.apiToken,
@@ -225,31 +206,28 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     log,
   });
 
-  // Mount Slack routes only when Slack is configured
   if (env.slackCredentials) {
     const publicUrl = env.publicUrl;
     if (!publicUrl) {
-      log(JSON.stringify({ event: "slack_disabled", reason: "PUBLIC_URL or RENDER_EXTERNAL_URL is required for Slack" }));
+      log.warn("slack disabled", { event: "slack_disabled", reason: "PUBLIC_URL or RENDER_EXTERNAL_URL is required for Slack" });
     } else {
-      const slack = createSlack(env.slackCredentials.botToken, env.slackApiUrl);
       mountSlackRoutes(app, {
         signingSecret: env.slackCredentials.signingSecret,
         allowedChannels: env.allowedChannels,
         callbackKey: env.slackCallbackKey ?? env.apiToken,
         publicUrl: publicUrl.replace(/\/$/, ""),
-        slack,
-        log,
+        slack: createSlack(env.slackCredentials.botToken, env.slackApiUrl),
       }, { startQuestion, log });
-      log(JSON.stringify({ event: "slack_enabled" }));
+      log.info("slack enabled", { event: "slack_enabled" });
     }
   }
 
   const server = serve({ fetch: app.fetch, port: env.port, hostname: "0.0.0.0" }, (info) => {
-    log(JSON.stringify({ event: "listening", port: info.port }));
+    log.info("listening", { event: "listening", port: info.port });
   });
 
   const shutdown = () => {
-    log(JSON.stringify({ event: "shutting_down" }));
+    log.info("shutting down", { event: "shutting_down" });
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 5_000).unref();
   };

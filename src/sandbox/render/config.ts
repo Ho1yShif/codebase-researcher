@@ -1,12 +1,13 @@
 import { join } from "node:path";
 import { z } from "zod";
 import config from "../../../config.ts";
-import { DEFAULT_CREDENTIALS, present, type HostCredentials } from "../../types.ts";
+import { DEFAULT_CREDENTIALS, type HostCredentials } from "../../bot-config.ts";
+import { present } from "../../util.ts";
 import { REPO_ROOT } from "../interface.ts";
 
 export type NetworkPolicy =
-  | { default: "allow-all" | "deny-all" }
-  | { default: "allow-list"; allowedDomains: string[] };
+  | { type: "allow-all" | "deny-all" }
+  | { type: "allow-list"; domains: string[] };
 
 export type RenderConfig = {
   apiKey: string;
@@ -53,8 +54,8 @@ export async function loadRenderConfig(
     hostCredentials: collectHostCredentials(config.gitCredentials, env),
     networkPolicy:
       e.SANDBOX_NETWORK_POLICY === "allow-list"
-        ? { default: "allow-list", allowedDomains: domains }
-        : { default: e.SANDBOX_NETWORK_POLICY },
+        ? { type: "allow-list", domains }
+        : { type: e.SANDBOX_NETWORK_POLICY },
     investigationTimeoutSeconds: e.SANDBOX_TIMEOUT_SECONDS,
     builderTimeoutSeconds: e.SANDBOX_BUILDER_TIMEOUT_SECONDS,
     minRequestIntervalMs: e.RENDER_API_MIN_INTERVAL_MS,

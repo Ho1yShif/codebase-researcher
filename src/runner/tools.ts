@@ -13,7 +13,6 @@ import {
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import { Type } from "typebox";
 
-
 /*
  * Usability guard, not a security boundary: it rejects obviously mutating or networked commands so the
  * model gets a clear message and adapts instead of burning turns. Shell parsing here is approximate and
@@ -248,15 +247,13 @@ export function splitCommands(line: string): string[][] {
   return commands;
 }
 
-// ── tools ───────────────────────────────────────────────────────────────
-
 const DEFAULT_TIMEOUT_S = 60;
 const MAX_TIMEOUT_S = 300;
 const LS_DEFAULT_LIMIT = 500;
 const LS_MAX_LIMIT = 2000;
 const OUTPUT_LIMIT = `${DEFAULT_MAX_LINES} lines / ${DEFAULT_MAX_BYTES / 1024}KB`;
 
-export interface ShellOptions {
+export interface InspectionToolOptions {
   reposRoot: string;
   scratchDir: string;
 }
@@ -284,7 +281,7 @@ export function shellEnv(path: string | undefined, scratchDir: string): Record<s
 }
 
 /** The read-only tools the agent gets, all rooted at the checkouts. */
-export function createInspectionTools(opts: ShellOptions): AgentTool<any>[] {
+export function createInspectionTools(opts: InspectionToolOptions): AgentTool<any>[] {
   const context: ExecutionToolContext = {
     env: new NodeExecutionEnv({ cwd: opts.reposRoot, shellEnv: shellEnv(process.env.PATH, opts.scratchDir) }),
   };
@@ -292,7 +289,7 @@ export function createInspectionTools(opts: ShellOptions): AgentTool<any>[] {
 }
 
 /** Pi's read tool without image attachments: the agent investigates source, and images only cost tokens. */
-function createTextReadTool(context: ExecutionToolContext, { reposRoot }: ShellOptions) {
+function createTextReadTool(context: ExecutionToolContext, { reposRoot }: InspectionToolOptions) {
   const inner = createReadTool();
   const tool: AgentTool<typeof inner.parameters, ReadToolDetails | undefined> = {
     ...inner,
@@ -313,7 +310,7 @@ const LsParams = Type.Object({
   limit: Type.Optional(Type.Integer({ description: `Maximum entries to return (default ${LS_DEFAULT_LIMIT})` })),
 });
 
-function createLsTool({ reposRoot }: ShellOptions): AgentTool<typeof LsParams> {
+function createLsTool({ reposRoot }: InspectionToolOptions): AgentTool<typeof LsParams> {
   return {
     name: "ls",
     label: "ls",
@@ -331,7 +328,7 @@ function createLsTool({ reposRoot }: ShellOptions): AgentTool<typeof LsParams> {
 }
 
 /** Pi's bash tool with an allowlisted env, the read-only command policy, and bounded timeouts. */
-function createSafeBashTool(context: ExecutionToolContext, { reposRoot, scratchDir }: ShellOptions) {
+function createSafeBashTool(context: ExecutionToolContext, { reposRoot, scratchDir }: InspectionToolOptions) {
   const inner = createBashTool({
     prepare: (execution) => {
       execution.cwd = reposRoot;

@@ -1,7 +1,8 @@
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
-import type { RepoManifest, RunnerEvent } from "../src/types.ts";
+import type { RepoManifest } from "../src/manifest.ts";
+import type { RunnerEvent } from "../src/runner/protocol.ts";
 import { AbortError, ClientError, RenderError, SandboxSnapshotNotFoundError, SandboxSnapshotNotReadyError } from "@renderinc/sdk";
 import type { SandboxExecEvent } from "@renderinc/sdk/experimental";
 import { list as listTar } from "tar";
@@ -13,6 +14,7 @@ import { loadRenderConfig, resolveWorkspaceId, type NetworkPolicy, type RenderCo
 import { openRenderSandbox, runInvestigation } from "../src/sandbox/render/sandbox.ts";
 import { buildSnapshot, parseLsRemote, pruneSnapshots } from "../src/sandbox/render/snapshot.ts";
 import { runnerInput } from "./helpers.ts";
+import { createLog } from "../src/log.ts";
 import config from "../config.ts";
 
 const GH_TOKEN = "ghp_renderProviderSecret000000000000";
@@ -57,7 +59,7 @@ class FakeApi {
   exec_: ExecHandler = () => [exit(0)];
   /** Contents of sandbox files other than manifest.json; undefined means the download fails. */
   file_: (path: string) => string | undefined = () => undefined;
-  status: "running" | "terminated" = "running";
+  status: "creating" | "running" | "terminated" = "running";
   manifest = (): RepoManifest => ({
     profile: "default",
     created_at: new Date().toISOString(),
@@ -153,9 +155,16 @@ function snapshot(id: string, status: "creating" | "available" | "failed", name?
 }
 
 let fake: FakeApi;
+let logs: Record<string, unknown>[];
+const silent = createLog({}, () => {});
 const SANDBOX_DIR = fileURLToPath(new URL("../sandbox-runtime/", import.meta.url));
+const OPEN = { timeoutMs: 60_000 };
 
-function client(policy: NetworkPolicy = { default: "allow-list", allowedDomains: ["api.anthropic.com"] }, api = fake.api()) {
+function client(
+  policy: NetworkPolicy = { type: "allow-list", domains: ["api.anthropic.com"] },
+  api = fake.api(),
+  timings: Partial<SandboxClient["t"]> = {},
+) {
   const cfg: RenderConfig = {
     apiKey: "rnd_test",
     workspaceId: "tea-test",
@@ -166,11 +175,13 @@ function client(policy: NetworkPolicy = { default: "allow-list", allowedDomains:
     minRequestIntervalMs: 0,
     sandboxDir: SANDBOX_DIR,
   };
-  return new SandboxClient(api, cfg, { pollMs: 1, bootTimeoutMs: 1_000, investigationGraceMs: 30_000 });
+  const log = createLog({}, (line) => void logs.push(JSON.parse(line)));
+  return new SandboxClient(api, cfg, log, { pollMs: 1, bootTimeoutMs: 1_000, investigationGraceMs: 30_000, ...timings });
 }
 
 beforeEach(() => {
   fake = new FakeApi();
+  logs = [];
 });
 
 const event = (e: object) => `${JSON.stringify({ at: new Date().toISOString(), ...e })}\n`;
@@ -361,6 +372,16 @@ describe("buildSnapshot", () => {
     expect(fake.calls.filter((c) => c.op === "terminate").map((c) => c.id)).toEqual(["sbx-1"]);
   });
 
+  it("fails the build, without snapshotting, when the builder can't confirm the runner is non-dumpable", async () => {
+    fake.exec_ = (id, command) =>
+      command.includes("verify.sh")
+        ? [out(`${JSON.stringify({ ...JSON.parse(info()), runnerNonDumpable: false })}\n`), exit(0)]
+        : prepareExec(id, command);
+    await expect(buildSnapshot(client(), { profile, heads, snapshotName: NAME })).rejects.toThrow("could not confirm the runner is non-dumpable");
+    expect(fake.calls.some((c) => c.op === "snapshot.create")).toBe(false);
+    expect(fake.calls.filter((c) => c.op === "terminate").map((c) => c.id)).toEqual(["sbx-1"]);
+  });
+
   it("builds from the shipped config.ts", async () => {
     fake.exec_ = prepareExec;
     const shipped = { name: config.name, repos: config.repos };
@@ -402,12 +423,23 @@ describe("pruneSnapshots", () => {
     expect(fake.inputs("snapshot.list").map((i) => (i as { cursor?: string }).cursor)).toEqual([undefined, "o99"]);
     expect(fake.inputs("snapshot.delete")).toEqual([{ sandboxGroupId: "sbg-1", snapshotId: "snp-1" }]);
   });
+
+  it("logs a failed prune through the client's log instead of throwing", async () => {
+    const api = fake.api();
+    api.snapshots.list = async () => {
+      throw new Error("list exploded");
+    };
+    await expect(pruneSnapshots(client(undefined, api), built, NAME, 2)).resolves.toBeUndefined();
+    expect(logs).toEqual([
+      { level: "warn", msg: "snapshot prune failed", snapshot_name: NAME, err: { name: "Error", message: "list exploded" } },
+    ]);
+  });
 });
 
 describe("openRenderSandbox", () => {
   it("creates a sandbox by snapshot name with the configured policy and timeout", async () => {
     fake.exec_ = prepareExec;
-    const sbx = await openRenderSandbox(client(), NAME);
+    const sbx = await openRenderSandbox(client(), NAME, OPEN);
     expect(sbx).toMatchObject(LAYOUT);
     expect(sbx.manifest.repos).toEqual(fake.manifest().repos);
     expect(sbx.info).toMatchObject({
@@ -435,7 +467,7 @@ describe("openRenderSandbox", () => {
   it("throws SnapshotUnavailableError when no snapshot with that name is available", async () => {
     fake.createError = (input) =>
       input?.snapshotName ? new SandboxSnapshotNotFoundError("snapshot not found", 404) : undefined;
-    await expect(openRenderSandbox(client(), "no-such-snap")).rejects.toMatchObject({
+    await expect(openRenderSandbox(client(), "no-such-snap", OPEN)).rejects.toMatchObject({
       name: "SnapshotUnavailableError",
       notReady: false,
     });
@@ -444,7 +476,7 @@ describe("openRenderSandbox", () => {
   it("reports a snapshot that exists but isn't available as notReady", async () => {
     fake.createError = (input) =>
       input?.snapshotName ? new SandboxSnapshotNotReadyError("snapshot not ready", 409) : undefined;
-    const err = await openRenderSandbox(client(), NAME).catch((e: unknown) => e);
+    const err = await openRenderSandbox(client(), NAME, OPEN).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SnapshotUnavailableError);
     expect(err).toMatchObject({ notReady: true });
   });
@@ -454,33 +486,75 @@ describe("openRenderSandbox", () => {
       command.includes("verify.sh")
         ? [out(`${JSON.stringify({ ...JSON.parse(info()), runnerNonDumpable: false })}\n`), exit(0)]
         : prepareExec(id, command);
-    await expect(openRenderSandbox(client(), NAME)).rejects.toThrow("could not confirm the runner is non-dumpable");
+    await expect(openRenderSandbox(client(), NAME, OPEN)).rejects.toThrow("could not confirm the runner is non-dumpable");
     expect(fake.calls.filter((c) => c.op === "terminate")).toHaveLength(1);
   });
 
   it("terminates the sandbox when verify fails", async () => {
     fake.exec_ = (id, command) =>
       command.includes("verify.sh") ? [out("verify: egress to https://example.com is allowed\n", "stderr"), exit(1)] : prepareExec(id, command);
-    await expect(openRenderSandbox(client({ default: "deny-all" }), NAME)).rejects.toThrow("verify.sh exited 1");
+    await expect(openRenderSandbox(client({ type: "deny-all" }), NAME, OPEN)).rejects.toThrow("verify.sh exited 1");
     expect(fake.calls.filter((c) => c.op === "terminate")).toHaveLength(1);
+  });
+
+  it("logs a failed cleanup and still reports the original error", async () => {
+    const api = fake.api();
+    api.terminate = async () => {
+      throw new Error("terminate exploded");
+    };
+    fake.exec_ = (id, command) => (command.includes("verify.sh") ? [exit(1)] : prepareExec(id, command));
+    await expect(openRenderSandbox(client(undefined, api), NAME, OPEN)).rejects.toThrow("verify.sh exited 1");
+    expect(logs).toEqual([
+      { level: "warn", msg: "could not terminate sandbox", sandbox_id: "sbx-1", err: { name: "Error", message: "terminate exploded" } },
+    ]);
+  });
+
+  it("gives up on a sandbox that isn't running within timeoutMs and terminates it", async () => {
+    fake.status = "creating";
+    await expect(openRenderSandbox(client(), NAME, { timeoutMs: 50 })).rejects.toThrow(
+      'could not open a sandbox from "codebase-researcher-corpus" within 50ms (SANDBOX_PROVISION_TIMEOUT_MS)',
+    );
+    expect(fake.calls.filter((c) => c.op === "terminate").map((c) => c.id)).toEqual(["sbx-1"]);
+    expect(fake.commands()).toEqual([]);
+  });
+
+  it("bounds verify.sh by the same deadline", async () => {
+    fake.exec_ = (id, command, signal) =>
+      command.includes("verify.sh")
+        ? (async function* () {
+            await new Promise((resolve) => signal!.addEventListener("abort", resolve));
+            throw new AbortError();
+          })()
+        : prepareExec(id, command);
+    const started = Date.now();
+    await expect(openRenderSandbox(client(), NAME, { timeoutMs: 100 })).rejects.toThrow("within 100ms");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(fake.calls.filter((c) => c.op === "terminate")).toHaveLength(1);
+  });
+
+  it("waits for boot as long as timeoutMs allows, not the client's own boot timeout", async () => {
+    fake.exec_ = prepareExec;
+    fake.status = "creating";
+    setTimeout(() => (fake.status = "running"), 100);
+    await expect(openRenderSandbox(client(undefined, undefined, { bootTimeoutMs: 10 }), NAME, OPEN)).resolves.toBeDefined();
   });
 
   it("accepts a policy reported with only the deprecated default field", async () => {
     fake.exec_ = prepareExec;
     fake.createdPolicy = { default: "allow-list" };
-    await expect(openRenderSandbox(client(), NAME)).resolves.toBeDefined();
+    await expect(openRenderSandbox(client(), NAME, OPEN)).resolves.toBeDefined();
   });
 
   it("terminates a sandbox created with wider egress than requested", async () => {
     fake.exec_ = prepareExec;
     fake.createdPolicy = { type: "allow-all" };
-    await expect(openRenderSandbox(client(), NAME)).rejects.toThrow("refusing to widen egress");
+    await expect(openRenderSandbox(client(), NAME, OPEN)).rejects.toThrow("refusing to widen egress");
     expect(fake.calls.filter((c) => c.op === "terminate")).toHaveLength(1);
   });
 
   it("refuses to create when the policy is allow-list with no domains", async () => {
     await expect(
-      openRenderSandbox(client({ default: "allow-list", allowedDomains: [] }), NAME),
+      openRenderSandbox(client({ type: "allow-list", domains: [] }), NAME, OPEN),
     ).rejects.toThrow("allow-list policy and no domains");
   });
 
@@ -488,7 +562,7 @@ describe("openRenderSandbox", () => {
     fake.exec_ = prepareExec;
     fake.createError = (input) =>
       input?.snapshotName ? new ClientError("Failed to create sandbox: invalid networkPolicy", 400) : undefined;
-    await expect(openRenderSandbox(client(), NAME)).rejects.toThrow(/SANDBOX_NETWORK_POLICY=allow-all/);
+    await expect(openRenderSandbox(client(), NAME, OPEN)).rejects.toThrow(/SANDBOX_NETWORK_POLICY=allow-all/);
   });
 });
 
@@ -544,15 +618,15 @@ describe("loadRenderConfig", () => {
       fakeFetch([{ id: "tea-only", name: "Only", type: "team" }]),
     );
     expect(cfg.workspaceId).toBe("tea-only");
-    expect(cfg.networkPolicy).toEqual({ default: "allow-list", allowedDomains: ["api.anthropic.com"] });
+    expect(cfg.networkPolicy).toEqual({ type: "allow-list", domains: ["api.anthropic.com"] });
     expect(cfg.investigationTimeoutSeconds).toBe(1_800);
   });
 });
 
 describe("configureSandboxes", () => {
   it("defaults to Render on Render and to local sandboxes elsewhere", async () => {
-    await expect(configureSandboxes({ RENDER: "true" })).rejects.toThrow("RENDER_API_KEY is required");
-    await expect(configureSandboxes({})).resolves.toBeTypeOf("function");
-    await expect(configureSandboxes({ SANDBOX_PROVIDER: "nope" })).rejects.toThrow('SANDBOX_PROVIDER must be "render" or "local"');
+    await expect(configureSandboxes({ RENDER: "true" }, silent)).rejects.toThrow("RENDER_API_KEY is required");
+    await expect(configureSandboxes({}, silent)).resolves.toBeTypeOf("function");
+    await expect(configureSandboxes({ SANDBOX_PROVIDER: "nope" }, silent)).rejects.toThrow('SANDBOX_PROVIDER must be "render" or "local"');
   });
 });

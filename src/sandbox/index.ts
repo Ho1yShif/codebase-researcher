@@ -1,3 +1,4 @@
+import type { Log } from "../log.ts";
 import type { OpenSandbox } from "./interface.ts";
 import { localSandboxes, loadLocalConfig } from "./local.ts";
 import { SandboxClient } from "./render/client.ts";
@@ -12,7 +13,8 @@ export { SnapshotUnavailableError, type OpenSandbox, type RunInvestigationResult
  * Throws on bad config, so callers can tell misconfiguration apart from a failed sandbox.
  */
 export async function configureSandboxes(
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv,
+  log: Log,
   allowedDomain?: string,
   fetcher?: typeof fetch,
 ): Promise<OpenSandbox> {
@@ -21,8 +23,8 @@ export async function configureSandboxes(
     case "local":
       return localSandboxes(loadLocalConfig(env));
     case "render": {
-      const client = SandboxClient.fromConfig(await loadRenderConfig(env, allowedDomain, fetcher));
-      return (snapshotName) => openRenderSandbox(client, snapshotName);
+      const client = SandboxClient.fromConfig(await loadRenderConfig(env, allowedDomain, fetcher), log);
+      return (snapshotName, opts) => openRenderSandbox(client, snapshotName, opts);
     }
     default:
       throw new Error(`SANDBOX_PROVIDER must be "render" or "local", got ${JSON.stringify(kind)}`);

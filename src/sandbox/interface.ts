@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { RunnerEvent, type RepoManifest, type RunnerInput } from "../types.ts";
+import type { RepoManifest } from "../manifest.ts";
+import { RunnerEvent, type RunnerInput } from "../runner/protocol.ts";
 
 export const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -18,11 +19,16 @@ export type Sandbox = {
   close(): Promise<void>;
 };
 
+export type OpenSandboxOptions = {
+  /** Deadline for restoring, booting, and verifying the sandbox. Local sandboxes restore nothing and ignore it. */
+  timeoutMs: number;
+};
+
 /**
  * Opens a verified sandbox from the newest available snapshot with this name.
  * Throws `SnapshotUnavailableError` when there is none.
  */
-export type OpenSandbox = (snapshotName: string) => Promise<Sandbox>;
+export type OpenSandbox = (snapshotName: string, opts: OpenSandboxOptions) => Promise<Sandbox>;
 
 export type RunInvestigationOptions = {
   /** `repos_root` and `scratch_dir` must come from the sandbox. */

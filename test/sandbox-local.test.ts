@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RunnerEvent } from "../src/types.ts";
+import type { RunnerEvent } from "../src/runner/protocol.ts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { shq, SnapshotUnavailableError, type OpenSandbox } from "../src/sandbox/interface.ts";
 import { localSandboxes, type LocalConfig } from "../src/sandbox/local.ts";
@@ -12,6 +12,7 @@ let root: string;
 let cfg: LocalConfig;
 let open: OpenSandbox;
 let commits: Record<string, string>;
+const OPEN = { timeoutMs: 60_000 };
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "researcher-local-sandbox-"));
@@ -32,8 +33,8 @@ afterAll(() => rm(root, { recursive: true, force: true }));
 
 describe("localSandboxes", () => {
   it("builds the manifest from the checkouts and gives each sandbox its own scratch dir", async () => {
-    const a = await open("ignored");
-    const b = await open("ignored");
+    const a = await open("ignored", OPEN);
+    const b = await open("ignored", OPEN);
     expect(a.id).not.toBe(b.id);
     expect(a.manifest.repos).toEqual([
       { repository: "acme/widget", branch: "main", commit: commits["acme/widget"], path: join(root, "repos/acme/widget") },
@@ -45,19 +46,19 @@ describe("localSandboxes", () => {
 
   it("treats a missing or dirty checkout as an unavailable snapshot", async () => {
     const missing = localSandboxes({ ...cfg, profile: { name: "test", repos: [{ repository: "acme/nope" }] } });
-    await expect(missing("ignored")).rejects.toBeInstanceOf(SnapshotUnavailableError);
+    await expect(missing("ignored", OPEN)).rejects.toBeInstanceOf(SnapshotUnavailableError);
 
     const stray = join(root, "repos/acme/gadget/stray.txt");
     await writeFile(stray, "x");
     try {
-      await expect(open("ignored")).rejects.toThrow(/acme\/gadget.*dirty/);
+      await expect(open("ignored", OPEN)).rejects.toThrow(/acme\/gadget.*dirty/);
     } finally {
       await rm(stray);
     }
   });
 
   it("returns events and delivers the key only through a file the runner deletes", async () => {
-    const sbx = await open("ignored");
+    const sbx = await open("ignored", OPEN);
     const key = "sk-ant-local-test-key";
     process.env.RESEARCHER_TEST_ECHO_KEY = key;
     let events: RunnerEvent[];
@@ -76,7 +77,7 @@ describe("localSandboxes", () => {
   });
 
   it("removes the key file even when the runner leaves it behind", async () => {
-    const sbx = await open("ignored");
+    const sbx = await open("ignored", OPEN);
     const { events } = await sbx.run({ input: runnerInput(sbx, "keep-key"), modelApiKey: "sk-ant-kept", timeoutMs: 10_000 });
     const report = runnerReport(events);
     expect(report.keyFileGone).toBe(false);
@@ -84,7 +85,7 @@ describe("localSandboxes", () => {
   });
 
   it("kills the runner at the deadline and on abort", async () => {
-    const sbx = await open("ignored");
+    const sbx = await open("ignored", OPEN);
     const input = runnerInput(sbx, "hang");
     const timedOut = await sbx.run({ input, timeoutMs: 500 });
     expect(timedOut).toMatchObject({ exitCode: 124, aborted: false });
@@ -100,7 +101,7 @@ describe("localSandboxes", () => {
 
   it("bundles the real runner on first use when no runner command is configured", { timeout: 60_000 }, async () => {
     const bundled = localSandboxes({ ...cfg, runnerCmd: undefined, runnerArgs: "--faux" });
-    const sbx = await bundled("ignored");
+    const sbx = await bundled("ignored", OPEN);
     const input = { ...runnerInput(sbx, "claude-sonnet-4-5"), manifest: sbx.manifest };
     const res = await sbx.run({ input, timeoutMs: 30_000 });
     expect(res.exitCode, res.stderrTail).toBe(0);
@@ -108,7 +109,7 @@ describe("localSandboxes", () => {
   });
 
   it("close removes the sandbox dir and is idempotent", async () => {
-    const sbx = await open("ignored");
+    const sbx = await open("ignored", OPEN);
     await sbx.close();
     expect(existsSync(sbx.scratchDir)).toBe(false);
     await expect(sbx.close()).resolves.toBeUndefined();

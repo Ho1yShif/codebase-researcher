@@ -1,6 +1,7 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
-import { type Evidence, InvestigationResult, type RunnerInput } from "../types.ts";
+import { type Evidence, InvestigationResult } from "../investigation.ts";
+import type { RunnerInput } from "./protocol.ts";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";

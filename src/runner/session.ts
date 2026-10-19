@@ -1,8 +1,10 @@
-import { type InvestigationResult, RUNNER_EXIT, type RunnerEvent, type RunnerInput } from "../types.ts";
+import type { InvestigationResult } from "../investigation.ts";
+import { errorMessage } from "../util.ts";
+import { RUNNER_EXIT, type RunnerEvent, type RunnerInput } from "./protocol.ts";
 import { Agent, type AfterToolCallContext, type AgentEvent } from "@earendil-works/pi-agent-core";
 import { isRetryableAssistantError, type AssistantMessage, type Models } from "@earendil-works/pi-ai";
-import { type Emitter, outputPreview, toUsage } from "./main.ts";
-import { type Model, PI_VERSION, THINKING_BUDGETS } from "./main.ts";
+import { type Emitter, outputPreview, toUsage } from "./events.ts";
+import { type Model, PI_VERSION, THINKING_BUDGETS } from "./model.ts";
 import { createInspectionTools } from "./tools.ts";
 import { createSubmitTool, MAX_SUBMIT_ATTEMPTS, SUBMIT_TOOL } from "./submit.ts";
 import CORE_PROMPT from "./core-prompt.md?raw";
@@ -14,7 +16,7 @@ export const SYSTEM_PROMPT = INSTANCE_PROMPT + "\n\n" + CORE_PROMPT;
 export const PROMPT_VERSION = createHash("sha256").update(SYSTEM_PROMPT).digest("hex").slice(0, 12);
 
 export const SUBMIT_REMINDER =
-  "You stopped without calling submit_investigation. Call it now, exactly once: a final_answer built from the evidence " +
+  `You stopped without calling ${SUBMIT_TOOL}. Call it now, exactly once: a final_answer built from the evidence ` +
   "you have (low confidence is acceptable), or needs_clarification if the question cannot be investigated without more context.";
 
 export function renderUserPrompt(input: RunnerInput): string {
@@ -38,7 +40,7 @@ export function renderUserPrompt(input: RunnerInput): string {
     "",
     transcript.join("\n\n"),
     "",
-    "The question for this turn is the most recent human message. Investigate, then call submit_investigation exactly once.",
+    `The question for this turn is the most recent human message. Investigate, then call ${SUBMIT_TOOL} exactly once.`,
   ].join("\n");
 }
 
@@ -144,12 +146,11 @@ export async function runSession({ input, models, apiKey, model, emit, startedAt
 
   if (submission) {
     emit({ type: "result", result: submission });
-  } else {
-    failure ??= diagnose(agent, thrown);
-    emit({ type: "error", ...failure });
+    return RUNNER_EXIT.ok;
   }
-  if (submission) return RUNNER_EXIT.ok;
-  return failure?.code === "timeout" ? RUNNER_EXIT.timeout : RUNNER_EXIT.error;
+  failure ??= diagnose(agent, thrown);
+  emit({ type: "error", ...failure });
+  return failure.code === "timeout" ? RUNNER_EXIT.timeout : RUNNER_EXIT.error;
 }
 
 function forward(event: AgentEvent, emit: Emitter) {
@@ -199,7 +200,7 @@ function stoppedOnItsOwn(agent: Agent): boolean {
 }
 
 function diagnose(agent: Agent, thrown: unknown): Failure {
-  if (thrown !== undefined) return { code: "agent_error", message: thrown instanceof Error ? thrown.message : String(thrown) };
+  if (thrown !== undefined) return { code: "agent_error", message: errorMessage(thrown) };
   const last = lastAssistant(agent);
   if (last?.stopReason === "error" || last?.stopReason === "aborted") {
     return { code: "agent_error", message: last.errorMessage ?? agent.state.errorMessage ?? `model request ${last.stopReason}` };

@@ -1,5 +1,6 @@
-import type { Evidence, InvestigationResult, RunnerEvent } from "../src/types.ts";
-import { defineConfig } from "../src/types.ts";
+import type { Evidence, InvestigationResult } from "../src/investigation.ts";
+import type { RunnerEvent } from "../src/runner/protocol.ts";
+import { defineConfig } from "../src/bot-config.ts";
 import { createFakeSlack, FakeSandboxes } from "./fakes.ts";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/workflow.ts";
@@ -64,7 +65,6 @@ function harness(env: Record<string, string> = {}) {
   function invDeps(): InvestigateDeps {
     return {
       config,
-      snapshotName: config.snapshotName,
       log,
       configureSandboxes: async () => sandboxes.open,
     };
@@ -264,6 +264,9 @@ describe("investigate", () => {
     const result = await investigateTask(h.invDeps(), { transcript: [], trace_id: "t1" });
     expect(result.kind).toBe("failed");
     expect(h.sandboxes.closed).toEqual(["sbx-1"]);
+    expect(h.logs).toContainEqual(expect.objectContaining({
+      level: "warn", event: "investigation_failed", code: "agent_error", message: "runner said agent_error",
+    }));
   });
 
   it("returns failed for missing snapshot without throwing", async () => {
@@ -292,6 +295,22 @@ describe("investigate", () => {
       investigateTask(h.invDeps(), { transcript: [], trace_id: "t3" }),
     ).rejects.toThrow("sandbox exec reset");
     expect(h.sandboxes.closed).toEqual(["sbx-1"]);
+  });
+
+  it("opens the configured snapshot within SANDBOX_PROVISION_TIMEOUT_MS", async () => {
+    const h = harness({ SANDBOX_PROVISION_TIMEOUT_MS: "120000" });
+    h.sandboxes.script(success());
+    const opened: unknown[] = [];
+    const deps: InvestigateDeps = {
+      ...h.invDeps(),
+      configureSandboxes: async () => (name, opts) => {
+        opened.push({ name, opts });
+        return h.sandboxes.open(name, opts);
+      },
+    };
+
+    await investigateTask(deps, { transcript: [], trace_id: "t-open" });
+    expect(opened).toEqual([{ name: h.config.snapshotName, opts: { timeoutMs: 120_000 } }]);
   });
 
   it("always terminates the sandbox", async () => {

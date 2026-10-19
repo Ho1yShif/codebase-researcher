@@ -1,4 +1,4 @@
-import { defineConfig } from "./src/types.ts";
+import { defineConfig } from "./src/bot-config.ts";
 
 // The example corpus is three public repositories, so a fresh deploy answers real questions
 // before you change anything. Replace them with your own.
