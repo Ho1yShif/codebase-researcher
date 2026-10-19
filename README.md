@@ -2,25 +2,36 @@
 
 A template for getting evidence-backed answers to questions about how your code behaves. Ask a question over the HTTP API or by mentioning the bot in Slack. An AI coding agent reads your repositories in a fresh, locked-down Render Sandbox and answers with file-and-line citations that are checked against the exact commit it read.
 
+The researcher is the service, the optional Slack bot is a channel adapter,
+and each question starts an agent inside an isolated Sandbox.
+
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/render-examples/codebase-researcher)
 
 The button deploys this repository as is, investigating its example corpus: three public repositories (the Render CLI, SDK, and agent skills). To point it at your own code, fork first and deploy your fork.
 
-Every answer has the same structure: a short answer, a confidence level, what was observed in code, what was inferred, what was not established, file-and-line evidence, a suggested owner, and an escalation-ready question for engineering. When the question is ambiguous, the agent asks a clarifying question instead. In Slack the answer is rendered as a threaded reply; over the API, the reply's `result` looks like this:
+Every answer has the same structure: a short answer, a confidence level, what was observed in code, what was inferred, what was not established, file-and-line evidence, a suggested owner, and an escalation-ready question for engineering. When the question is ambiguous, the agent asks a clarifying question instead. In Slack the answer is rendered as a threaded reply. A completed API poll returns the answer under `reply.result`:
 
 ```json
 {
-  "status": "final_answer",
-  "answer": "...",
-  "confidence": "high",
-  "observed_in_code": ["..."],
-  "inferred_behavior": ["..."],
-  "not_established": ["..."],
-  "evidence": [
-    {"repository": "owner/repo", "commit": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", "path": "src/file.ts", "start_line": 10, "end_line": 25, "url": "https://..."}
-  ],
-  "suggested_owner": "...",
-  "escalation_question": "..."
+  "id": "trn-abc123def456.Kx9mZ7...",
+  "status": "completed",
+  "reply": {
+    "kind": "answer",
+    "traceId": "trn-abc123def456",
+    "result": {
+      "status": "final_answer",
+      "answer": "...",
+      "confidence": "high",
+      "observed_in_code": ["..."],
+      "inferred_behavior": ["..."],
+      "not_established": ["..."],
+      "evidence": [
+        {"repository": "owner/repo", "commit": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", "path": "src/file.ts", "start_line": 10, "end_line": 25, "url": "https://..."}
+      ],
+      "suggested_owner": "...",
+      "escalation_question": "..."
+    }
+  }
 }
 ```
 
@@ -68,21 +79,17 @@ The [security boundary](docs/WALKTHROUGH.md#the-security-boundary) section of th
 
 ## Get running
 
-You need a Render workspace with Sandboxes access in the Oregon region, a Render API key, and a model API key (Anthropic by default).
+You need a Render workspace with Sandboxes access in the Oregon region, a
+Render API key, and a model API key (Anthropic by default). The Blueprint uses
+paid plans for the API and snapshot cron; see the
+[prerequisites](docs/QUICKSTART.md#prerequisites) before deploying.
 
 1. Fork this repository. Edit `config.ts` to list your repositories and `prompt.md` to describe your product. Commit and push.
 2. In the Render Dashboard, create a Blueprint from your fork and paste the secrets it asks for.
 3. Trigger the `codebase-researcher-snapshots` cron job once to build the first snapshot (about 5 minutes).
-4. Ask a question:
-
-```bash
-curl -X POST https://<your-api-service>.onrender.com/v1/questions \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"transcript": [{"text": "How does the CLI pick a workspace in CI?"}]}'
-```
-
-Then poll `GET /v1/questions/<id>` with the same token until the status is `completed`. An investigation usually takes one to two minutes.
+4. Follow [Ask your first question](docs/QUICKSTART.md#ask-your-first-question)
+   to send a request and poll its result. An investigation usually takes one
+   to two minutes.
 
 To try it on your machine first, without a Sandbox or a model key, clone a couple of repositories into `.scratch/repos/` and run the workflow and the API locally with the runner's `--faux` mode, which follows a fixed script instead of calling a model. [Run it locally](docs/QUICKSTART.md#run-it-locally) has the commands.
 
@@ -90,7 +97,7 @@ To try it on your machine first, without a Sandbox or a model key, clone a coupl
 
 - [docs/QUICKSTART.md](docs/QUICKSTART.md): setup, deploy, Slack, local development, customization, configuration reference, and operations.
 - [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md): the repository layout, the main constructs and interfaces, and how a question moves through them.
-- [docs/TAKEAWAYS.md](docs/TAKEAWAYS.md): key takeaways and patterns you can reuse in your own projects.
+- [docs/TAKEAWAYS.md](docs/TAKEAWAYS.md): reusable patterns and their implementation locations.
 - [`examples/hello-sandbox.ts`](examples/hello-sandbox.ts): a short round trip through the Sandbox API (create, wait, upload, exec, download, terminate). Start here if you are learning Render Sandboxes, then read the walkthrough's [Sandboxes](docs/WALKTHROUGH.md#sandboxes) section to see how this project builds, restores, verifies, and secures them.
 
 ## License

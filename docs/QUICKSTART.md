@@ -133,7 +133,9 @@ To ask a follow-up, mention the bot again in the same thread; the adapter reads 
 
 Local runs use the real workflow, API, runner, tools, and citation checks, but replace the Sandbox with a child process on your machine. Local sandboxes provide no isolation; they are for development and tests. The walkthrough's [Sandboxes](WALKTHROUGH.md#sandboxes) section explains the interface both kinds implement.
 
-You need Node 22.19 or later (the repository pins Node 24 in `.node-version`), pnpm 11, and the Render CLI 2.11 or later. Install dependencies with:
+Use Node 24, as pinned in `.node-version`; the Sandbox tooling supports
+22.19 or later. You also need pnpm 11 and Render CLI 2.11 or later. Install
+dependencies with:
 
 ```bash
 pnpm install
@@ -171,7 +173,7 @@ Ask a question, then poll with the returned `id`:
 
 ```bash
 curl -s localhost:3000/v1/questions -H "Authorization: Bearer dev-token" -H "content-type: application/json" \
-  -d '{"transcript":[{"text":"How does the CLI pick a workspace?"}]}'
+  -d '{"transcript":[{"text":"What changed in the latest commit?"}]}'
 curl -s localhost:3000/v1/questions/<id> -H "Authorization: Bearer dev-token"
 ```
 
@@ -179,7 +181,7 @@ The local provider bundles the runner into `.scratch/runner/` each time an inves
 
 ### Run without a model: `--faux`
 
-`LOCAL_RUNNER_ARGS=--faux` makes the runner follow a fixed script instead of calling a model: it reads the first repository's latest commit and README through the real tools, then submits a low-confidence answer citing the README, which goes through the real citation check. No API key or network is needed. Include the word "clarify" in the question to get a clarification instead. The walkthrough's [`faux.ts`](WALKTHROUGH.md#fauxts-running-without-a-model) section has the details.
+`LOCAL_RUNNER_ARGS=--faux` makes the runner follow a fixed script instead of calling a model: it reads the first repository's latest commit and README through the real tools, then submits a low-confidence answer citing the README, which goes through the real citation check. No API key or network is needed. Include the word "clarify" in the question to get a clarification instead. The walkthrough's [Running without a model](WALKTHROUGH.md#fauxts-running-without-a-model) section has the implementation details.
 
 To run a real investigation, drop `LOCAL_RUNNER_ARGS` and set your model key (for example `ANTHROPIC_API_KEY`) in terminal 1.
 
@@ -247,7 +249,11 @@ Labels change only the Slack rendering, not the JSON field names in the API resp
 
 ### Choose a model
 
-Set `MODEL_PROVIDER` and `MODEL` on the workflow service. Change them in `render.yaml` in your fork, so a Blueprint sync doesn't restore the old values. The Sandbox egress allow-list is derived from the model's base URL in Pi's model registry, so it follows the model automatically.
+Set `MODEL_PROVIDER` and `MODEL` on the workflow service. Change them in
+`render.yaml` in your fork: when Render syncs the Blueprint, values declared
+there replace Dashboard edits. The Sandbox egress allow-list is derived from
+the model's base URL in Pi's model registry, so it follows the model
+automatically.
 
 | Provider | `MODEL` | Egress host | Key variable |
 |---|---|---|---|
@@ -255,7 +261,13 @@ Set `MODEL_PROVIDER` and `MODEL` on the workflow service. Change them in `render
 | `openai` | Set it explicitly | `api.openai.com` | `OPENAI_API_KEY` |
 | `google` | Set it explicitly | `generativelanguage.googleapis.com` | `GEMINI_API_KEY` |
 
-These three are tested. The `MODEL` default is `claude-opus-5` whatever the provider, so set `MODEL` whenever you change `MODEL_PROVIDER`. Other providers in Pi's registry (`openrouter`, `mistral`, `groq`, `xai`, `deepseek`, and more) will likely work but haven't been validated end to end, and tool-calling quality varies by model. A provider and model that aren't in the registry make every question fail as misconfigured.
+These three are tested. When `MODEL` is unset, the workflow falls back to
+`claude-opus-5`; always set a model from the selected provider's Pi registry
+entry when changing `MODEL_PROVIDER`. Other providers in Pi's registry
+(`openrouter`, `mistral`, `groq`, `xai`, `deepseek`, and more) will likely
+work but have not been validated end to end, and tool-calling quality varies
+by model. A provider and model that are not in the registry make every
+question fail as misconfigured.
 
 The workflow passes `MODEL_API_KEY` to the runner if it is set, and otherwise the provider's own key variable from the table. For a provider other than Anthropic, add its key variable (or `MODEL_API_KEY`) to the workflow service as a `sync: false` entry in `render.yaml`. `PI_THINKING_LEVEL` sets the reasoning effort: `off`, `minimal`, `low`, `medium` (the default), or `high`.
 
@@ -293,12 +305,20 @@ The investigation pipeline knows nothing about Slack. It answers a question: a t
 
 #### The four steps
 
-1. **Receive and acknowledge the platform's event.** Verify its signature, then respond within the platform's deadline (3 seconds for both Slack and Discord) before doing anything slow. The Slack adapter responds first and does the rest in `startMention`, in [`src/slack/routes.ts`](../src/slack/routes.ts).
+1. **Receive and acknowledge the platform's event.** Verify its signature,
+   then respond within its documented deadline before doing anything slow.
+   Slack requires an acknowledgement within 3 seconds. Confirm the current
+   deadline in the other platform's documentation. The Slack adapter responds
+   first and does the rest in `startMention`, in
+   [`src/slack/routes.ts`](../src/slack/routes.ts).
 2. **Build a transcript.** An array of `{ text, author?, is_agent? }`, oldest first, with at most 200 messages of at most 8,000 characters each (`TRANSCRIPT_MAX_MESSAGES` and `MESSAGE_MAX_CHARS` in [`src/question.ts`](../src/question.ts)). Mark the bot's own earlier replies `is_agent: true` so follow-up questions read as a conversation. `fitTranscript` in [`src/slack/transcript.ts`](../src/slack/transcript.ts) trims a long thread to these limits; reuse it.
 3. **Start a question with a callback.** Pass a callback URL that points back at your adapter, a callback secret, and `metadata` with whatever you need to route the reply (at most 16 string, number, or boolean values). Use the platform's event or interaction ID as the idempotency key, so a redelivered event doesn't start a second run.
 4. **Receive the callback and render the reply.** Verify `X-Researcher-Signature` with `verifyCallback` from [`src/callback.ts`](../src/callback.ts), read your routing details back out of `metadata`, and render the `reply`: an `answer`, a `clarification`, or a `failure`.
 
-Derive each callback secret from a key and the event ID (`HMAC-SHA256(key, event_id)`), as the Slack adapter does with `SLACK_CALLBACK_KEY`. The callback can then be verified without storing anything, and a leaked secret is good for one question only. Callback secrets travel in workflow task input, which is visible in the Render Dashboard.
+Derive a per-event callback secret rather than storing one. The
+[callback format](WALKTHROUGH.md#callback-format) defines secret derivation,
+request signing, and verification. Callback secrets travel in workflow task
+input, which is visible in the Render Dashboard.
 
 #### Where the adapter runs
 
@@ -312,103 +332,10 @@ Derive each callback secret from a key and the event ID (`HMAC-SHA256(key, event
 - Respect the platform's message limits (Slack sections are 3,000 characters; a Discord message is 2,000). Shorten lists, not the short answer.
 - `failure.reason` is safe to show users; it never contains stack traces or secrets.
 
-#### Sketch: a Discord slash command
-
-This is a starting point, not a tested adapter. It handles a `/ask question:<text>` command through Discord's interactions endpoint. Register the command and set the app's Interactions Endpoint URL to `https://<your-api>/discord/interactions` in the Discord Developer Portal.
-
-Two Discord details shape it:
-
-- An interaction must be answered within 3 seconds, so the adapter answers with a deferred response (type 5, shown as "thinking…") and edits that message when the callback arrives.
-- An interaction token is valid for 15 minutes. With the default 15-minute agent timeout plus the Sandbox restore, a slow investigation can outlive it. For long investigations, post the answer to the channel with a bot token instead (`POST /channels/{channel_id}/messages`).
-
-Saved as `src/discord.ts`:
-
-```typescript
-import { createHmac, createPublicKey, verify } from "node:crypto";
-import type { Hono } from "hono";
-import { verifyCallback } from "./callback.ts";
-import type { Log } from "./log.ts";
-import { MESSAGE_MAX_CHARS, type Reply, type StartQuestion } from "./question.ts";
-import { errorMessage } from "./util.ts";
-
-type DiscordDeps = { publicKey: string; appId: string; callbackKey: string; publicUrl: string };
-
-/** Discord signs interactions with Ed25519 over timestamp + body, using the app's public key (hex). */
-const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
-function verifyDiscord(publicKeyHex: string, signature: string | undefined, timestamp: string | undefined, body: string): boolean {
-  if (!signature || !timestamp) return false;
-  const key = createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(publicKeyHex, "hex")]), format: "der", type: "spki" });
-  return verify(null, Buffer.from(timestamp + body), key, Buffer.from(signature, "hex"));
-}
-
-const callbackSecret = (key: string, interactionId: string) => createHmac("sha256", key).update(interactionId).digest("hex");
-
-function toDiscord(reply: Reply): string {
-  const text =
-    reply.kind === "answer"
-      ? [reply.result.answer, ...reply.result.evidence.map((e) => `<${e.url}>`)].join("\n")
-      : reply.kind === "clarification"
-        ? reply.result.question
-        : `I couldn't complete this investigation: ${reply.reason}. Trace ${reply.traceId}`;
-  return text.length > 2000 ? `${text.slice(0, 1999)}…` : text;
-}
-
-export function mountDiscordRoutes(app: Hono, deps: DiscordDeps, { startQuestion, log }: { startQuestion: StartQuestion; log: Log }) {
-  app.post("/discord/interactions", async (c) => {
-    const body = await c.req.text();
-    if (!verifyDiscord(deps.publicKey, c.req.header("x-signature-ed25519"), c.req.header("x-signature-timestamp"), body)) {
-      return c.text("invalid signature", 401);
-    }
-    const interaction = JSON.parse(body);
-    if (interaction.type === 1) return c.json({ type: 1 }); // PING, sent when you save the endpoint URL
-
-    const question = interaction.data?.options?.find((o: { name: string }) => o.name === "question")?.value;
-    void startQuestion(
-      {
-        transcript: [{ text: String(question ?? "").slice(0, MESSAGE_MAX_CHARS), author: interaction.member?.user?.id ?? interaction.user?.id }],
-        callback: { url: `${deps.publicUrl}/discord/deliver`, secret: callbackSecret(deps.callbackKey, interaction.id) },
-        metadata: { interaction_id: interaction.id, token: interaction.token },
-      },
-      { idempotencyKey: interaction.id, signal: AbortSignal.timeout(10_000) },
-    ).then(
-      (run) => log.info("task started", { event: "task_started", interaction_id: interaction.id, run_id: run.id }),
-      (err: unknown) => log.error("task start failed", { event: "task_start_failed", interaction_id: interaction.id, error: errorMessage(err) }),
-    );
-    return c.json({ type: 5 }); // deferred: "thinking…" until the callback edits it
-  });
-
-  app.post("/discord/deliver", async (c) => {
-    const raw = await c.req.text();
-    const { reply, metadata } = JSON.parse(raw) as { reply: Reply; metadata?: { interaction_id?: string; token?: string } };
-    if (!metadata?.interaction_id || !metadata.token) return c.text("missing metadata", 400);
-    const ok = verifyCallback({
-      secret: callbackSecret(deps.callbackKey, metadata.interaction_id),
-      signature: c.req.header("x-researcher-signature"),
-      timestamp: c.req.header("x-researcher-timestamp"),
-      body: raw,
-    });
-    if (!ok) return c.text("unauthorized", 401);
-
-    const res = await fetch(`https://discord.com/api/v10/webhooks/${deps.appId}/${metadata.token}/messages/@original`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ content: toDiscord(reply), allowed_mentions: { parse: [] } }),
-    });
-    // A non-2xx makes the workflow's deliver subtask retry (up to 8 times).
-    return res.ok ? c.text("ok") : c.text(`discord answered ${res.status}`, 502);
-  });
-}
-```
-
-Mount it next to the Slack adapter in `src/api.ts`, passing the same `startQuestion` and `log`:
-
-```typescript
-mountDiscordRoutes(app, { publicKey, appId, callbackKey, publicUrl }, { startQuestion, log });
-```
-
-The interaction token in `metadata` is visible in the Dashboard with the rest of the task input. It only lets someone edit this one response, and only until it expires.
-
-To finish it: render the full answer (observed, inferred, and not established), handle follow-ups by threading replies, add tests modeled on the Slack adapter's in [`test/slack.test.ts`](../test/slack.test.ts), and add its environment variables to `render.yaml` and the [configuration reference](#configuration-reference).
+The walkthrough includes an untested
+[Discord adapter sketch](WALKTHROUGH.md#example-discord-adapter) that applies
+these steps. Confirm Discord's current acknowledgement deadline, interaction
+token lifetime, request-signature format, and response limits before using it.
 
 ### Run a second deployment
 
@@ -573,11 +500,13 @@ These come from the platform and shape how far one deployment goes:
 - **Region:** Oregon only, during early access.
 - **Run retention:** Render keeps each workflow run's input and result for 30 days. After that, `GET /v1/questions/:id` returns 404. Until then, transcripts and callback secrets are visible to anyone with access to the workflow service in the Dashboard.
 - **Snapshot expiry:** snapshots use Render's default lifetime. The hourly cron keeps a fresh one available. If builds fail long enough for the last snapshot to expire, questions fail until a build succeeds.
-- **Timeouts:** each `investigate` attempt gets `SANDBOX_PROVISION_TIMEOUT_MS` to open its Sandbox, `AGENT_TIMEOUT_MS` for the agent, and 5 more minutes for setup, collecting output, and cleanup: 25 minutes with the defaults. Infrastructure failures are retried twice, so in the worst case a failing question takes about 75 minutes to report back. The walkthrough's [retries and timeouts](WALKTHROUGH.md#retries-and-timeouts) section has the full calculation.
+- **Timeouts:** each `investigate` attempt gets `SANDBOX_PROVISION_TIMEOUT_MS` to open its Sandbox, `AGENT_TIMEOUT_MS` for the agent, and 5 more minutes for setup, collecting output, and cleanup: 25 minutes with the defaults. When infrastructure retries are exhausted, the investigation path takes about 75 minutes to report back. The parent task has a separate 103-minute ceiling that also budgets callback retries; the walkthrough's [retries and timeouts](WALKTHROUGH.md#retries-and-timeouts) section has the full calculation.
 
 ### Measured numbers
 
-From live runs against real Render Sandboxes with `claude-opus-5`:
+From live runs against real Render Sandboxes with `claude-opus-5`. The build
+measurement used a larger 17-repository test corpus, not the three-repository
+example configuration shipped here:
 
 - Building a 17-repository snapshot (about 2 GB of checkouts): about 5 minutes.
 - Restoring a fresh Sandbox from the snapshot: about 15 seconds.

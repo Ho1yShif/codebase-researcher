@@ -1,6 +1,9 @@
 # Takeaways
 
-The patterns in this project worth copying, and where each one lives. Items under "Running untrusted work in Sandboxes" apply to any Sandbox integration. Items under "Working with AI agents" are specific to running a coding agent next to an API key.
+Reusable patterns and their implementation locations. Items under "Running
+untrusted work in Sandboxes" apply to any Sandbox integration. Items under
+"Working with AI agents" are specific to running a coding agent next to an
+API key.
 
 ## Architecture
 
@@ -48,11 +51,19 @@ The patterns in this project worth copying, and where each one lives. Items unde
 
 - **Acknowledge webhooks first, then do the work, keyed on the event ID.** Slack retries unless it gets a 200 within 3 seconds, so the adapter verifies the signature, responds, and only then reads the thread and starts the run. The event ID is the idempotency key, so a redelivered event doesn't start a second run. See [`src/slack/routes.ts`](../src/slack/routes.ts) and [The API service and Slack adapter](WALKTHROUGH.md#the-api-service-and-slack-adapter).
 
-- **Sign what you hand out, and derive secrets instead of storing them.** Each callback is signed with `HMAC(key, event_id)` over a timestamp and the body, so the receiver verifies it without storing anything and a leaked secret is good for one question. Question IDs carry an HMAC keyed on `API_TOKEN`, so `GET /v1/questions/:id` can read only runs this API started. See [`src/callback.ts`](../src/callback.ts) and [`src/api.ts`](../src/api.ts).
+- **Sign what you hand out, and derive secrets instead of storing them.**
+  Derive each callback secret with
+  `HMAC-SHA256(SLACK_CALLBACK_KEY, event_id)`, then sign
+  `timestamp + "." + body` with that secret. The receiver stores nothing, and
+  a leaked secret is valid for one question. Question IDs carry a separate
+  HMAC keyed on `API_TOKEN`, so `GET /v1/questions/:id` can read only runs
+  this API started. See [`src/callback.ts`](../src/callback.ts),
+  [`src/api.ts`](../src/api.ts), and
+  [Callback format](WALKTHROUGH.md#callback-format).
 
 - **Log one structured line per outcome.** Every question ends with a `turn_finished` line (outcome, model, prompt version, commits, tokens, cost, duration) and every cron run with a `snapshot_refresh` line, so each alert needs one filter. The cron also exits non-zero when a build fails. See [`src/log.ts`](../src/log.ts), [`src/cron.ts`](../src/cron.ts), and [Operate it](QUICKSTART.md#operate-it).
 
-- **State residual risks plainly.** DNS still resolves inside the Sandbox, the model provider's host is shared with its other customers, and anyone who can ask can read the code. Each is written down with why it's accepted and what would close it. See [The security boundary](WALKTHROUGH.md#the-security-boundary) and [Out of scope](WALKTHROUGH.md#out-of-scope).
+- **State residual risks plainly.** DNS still resolves inside the Sandbox, the model provider's host is shared with its other customers, and anyone who can ask can read the code. Each is written down with why it's accepted and what would close it. See [The security boundary](WALKTHROUGH.md#the-security-boundary).
 
 ## Render platform features shown here
 
