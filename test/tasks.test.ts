@@ -261,7 +261,7 @@ describe("investigateTask", () => {
     expect(res).toEqual({ kind: "failed", code: "agent_error" });
     expect(h.sandboxes.runs[0]!.opts.modelApiKey).toBe(MODEL_KEY);
     expect(h.logs).toContainEqual(expect.objectContaining({
-      level: "warn", event: "investigation_failed", code: "agent_error", message: "provider rejected [redacted]",
+      level: "warn", event: "investigation_failed", trace_id: expect.any(String), code: "agent_error", message: "provider rejected [redacted]",
     }));
     expect(JSON.stringify(h.logs)).not.toContain(MODEL_KEY);
   });

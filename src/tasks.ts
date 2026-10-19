@@ -330,7 +330,12 @@ export async function investigateTask(
       { elapsedMs: Date.now() - startedAt, agentTimeoutMs: config.agentTimeoutMs },
     );
     if (verdict.kind === "failed") {
-      log.warn("investigation failed", { event: "investigation_failed", code: verdict.code, message: redact(verdict.message) });
+      log.warn("investigation failed", {
+        event: "investigation_failed",
+        trace_id: input.trace_id,
+        code: verdict.code,
+        message: redact(verdict.message),
+      });
       return { kind: "failed", code: verdict.code };
     }
 

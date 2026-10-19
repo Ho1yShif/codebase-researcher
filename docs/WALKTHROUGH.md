@@ -130,7 +130,7 @@ The types are split by audience, so each service imports only the contract it ne
 
 - [`src/question.ts`](../src/question.ts) is the public contract: the transcript shape `POST /v1/questions` accepts (at most 200 messages of at most 8,000 characters), the callback and metadata schemas, the `StartQuestion` function type shared by the HTTP route and the Slack adapter, and the `Reply` the workflow returns.
 - [`src/investigation.ts`](../src/investigation.ts) is what the runner and workflow exchange internally: the internal transcript (with `ts`, `user_id`, `is_agent`), the `InvestigationResult` union of `FinalAnswer` and `NeedsClarification`, the `Evidence` schema, and `buildEvidenceUrl`, which turns a citation into a GitHub, GitLab, Bitbucket, or templated link.
-- [`src/manifest.ts`](../src/manifest.ts) describes a sandbox's contents: a `RepoManifest` lists each repository's name, branch, full commit, path, and optional clone URL and link style. `RepoProfile` is the configured list before heads are resolved.
+- [`src/manifest.ts`](../src/manifest.ts) describes a Sandbox's contents: a `RepoManifest` lists each repository's name, branch, full commit, path, and optional clone URL and link style. `RepoProfile` is the configured list before heads are resolved.
 - [`src/bot-config.ts`](../src/bot-config.ts) defines `defineConfig`, which [`config.ts`](../config.ts) calls. It validates the config at import time, defaults `gitCredentials` to `GITHUB_TOKEN` for `github.com`, and lets `REPOS` and `SNAPSHOT_NAME` override the repo list and snapshot name.
 - [`src/runner/protocol.ts`](../src/runner/protocol.ts) is the contract between the workflow and the runner process (see [The runner](#the-runner)).
 - [`src/runner/providers.ts`](../src/runner/providers.ts) maps each Pi provider to its API key env vars. The workflow uses it to find the key to send; the runner uses it to scrub every provider's vars from its environment.
@@ -216,7 +216,7 @@ When it has completed:
 }
 ```
 
-`trace_id` is the `answer_question` run ID; find the run under the workflow service's task runs in the Dashboard. Evidence `commit` is always the full SHA from the sandbox's manifest, and `url` is built by trusted code from the configured link style, never by the model (see [`filterEvidence`](#evidence-filtering)).
+`trace_id` is the `answer_question` run ID; find the run under the workflow service's task runs in the Dashboard. Evidence `commit` is always the full SHA from the Sandbox's manifest, and `url` is built by trusted code from the configured link style, never by the model (see [`filterEvidence`](#evidence-filtering)).
 
 The `reply` is one of three kinds, defined in [`src/question.ts`](../src/question.ts):
 
@@ -263,8 +263,8 @@ Verify the signature against the raw request body, before parsing it. In Node:
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 function verify(secret: string, signature: string, timestamp: string, body: string): boolean {
-  const maxAge = 5 * 60;
-  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > maxAge) return false;
+  const ts = Number(timestamp);
+  if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > 5 * 60) return false;
   const expected = `v1=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
   return expected.length === signature.length && timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
 }
@@ -327,18 +327,7 @@ The route then posts the formatted reply in the thread and swaps `eyes` for `whi
 
 [`formatReply`](../src/slack/format.ts) escapes `&`, `<`, and `>` in everything the model wrote, which also defuses `<!channel>` and `<@U…>` pings the model might produce, and truncates to Slack's 3,000-character section limit without leaving half an entity, link, or surrogate pair at the cut. The owner and escalation-question headings, and the team that failure messages tell users to contact, come from `labels` in `config.ts`.
 
-### How an adapter maps to the question API
-
-The Slack adapter touches the question API in four places, and any other channel follows the same shape:
-
-| Adapter step | Question API |
-|---|---|
-| Verify the platform's request and acknowledge within its deadline | (nothing yet) |
-| Build a transcript from the conversation, marking the bot's own messages | `transcript`, within 200 messages of 8,000 characters |
-| Start the question with a per-event callback secret and routing metadata | `callback`, `metadata`, and the platform event ID as the idempotency key |
-| Verify the callback, read the routing back out of `metadata`, render the reply | `X-Researcher-Signature`, `reply.kind` |
-
-An adapter can run inside the API service, like Slack, and call `startQuestion` directly, or as a separate service that calls `POST /v1/questions` with the API token. [QUICKSTART.md](QUICKSTART.md#add-a-channel-beyond-slack) walks through both, with a Discord sketch.
+Any other channel follows the same four steps: acknowledge the platform's event, build a transcript, start a question with a per-event callback secret and routing metadata, and render the reply when the callback arrives. The quickstart's [Add a channel beyond Slack](QUICKSTART.md#add-a-channel-beyond-slack) walks through them, including where an adapter can run, with a Discord sketch.
 
 ## The workflow
 
@@ -349,7 +338,7 @@ An adapter can run inside the API service, like Slack, and call `startQuestion` 
 [`answerQuestion`](../src/tasks.ts) is the parent task. Its trace ID is its own task run ID, the same ID the API wraps into the question ID.
 
 1. Parse the input against `AnswerQuestionInput`. If the transcript is invalid, the task skips the investigation and replies with an `invalid_question` failure, reading the callback and metadata on their own so it can still deliver that reply. A caller waiting on its callback, like a Slack thread, would otherwise wait forever.
-2. Run `investigate` as a subtask with the transcript converted to the internal shape (`toInternalTranscript`). If the subtask throws after exhausting its retries, the outcome becomes `retries_exhausted`.
+2. Run `investigate` as a subtask with the transcript converted to the internal shape (`toInternalTranscript`). If the subtask throws after exhausting its retries, the task logs `investigation failed` and the outcome becomes `retries_exhausted`.
 3. Build the `Reply`: `answer` or `clarification` from a result, or `failure` with a reason from [`failureReason`](#failure-classification).
 4. If there is a callback, run `deliver` with the JSON body `{ trace_id, reply, metadata }`. A delivery that fails every retry is logged as `deliver_failed` and doesn't fail the task, so the reply is still readable through `GET`.
 5. Log one `turn_finished` line with the outcome, model, prompt version, the commit of each repository read, token usage, cost, and duration. Return `{ trace_id, outcome, reply }`, which is what `GET /v1/questions/:id` serves.
@@ -360,12 +349,12 @@ An adapter can run inside the API service, like Slack, and call `startQuestion` 
 
 [`investigateTask`](../src/tasks.ts) runs one investigation:
 
-1. Look up the model in Pi's built-in registry. An unknown provider or model is a configuration error (`misconfigured`). The model's base URL gives the one host the sandbox may reach, for example `api.anthropic.com`.
-2. Configure sandboxes with [`configureSandboxes`](../src/sandbox/index.ts), passing that host. Bad sandbox configuration (a missing `RENDER_API_KEY`, or a key that sees several workspaces with no `RENDER_WORKSPACE_ID`) is also `misconfigured`.
-3. Open a sandbox from the snapshot by name, within `SANDBOX_PROVISION_TIMEOUT_MS`. A missing snapshot becomes `no_snapshot`, and one that exists but isn't available yet becomes `snapshot_not_ready`.
-4. Build the `RunnerInput` from the trace ID, transcript, the sandbox's manifest and paths, the model, thinking level, and agent timeout, and run the runner once with `sandbox.run`. Runner stderr is streamed into the workflow logs with the model key redacted.
-5. Fold the runner's events into a capture ([`captureRun`](../src/tasks.ts)), classify the run ([`classifyRun`](#failure-classification)), and pass a result through [`filterEvidence`](#evidence-filtering).
-6. Close the sandbox in a `finally` block, whatever happened.
+1. Look up the model in Pi's built-in registry. An unknown provider or model is a configuration error (`misconfigured`). The model's base URL gives the one host the Sandbox may reach, for example `api.anthropic.com`.
+2. Configure Sandboxes with [`configureSandboxes`](../src/sandbox/index.ts), passing that host. Bad Sandbox configuration (a missing `RENDER_API_KEY`, or a key that sees several workspaces with no `RENDER_WORKSPACE_ID`) is also `misconfigured`.
+3. Open a Sandbox from the snapshot by name, within `SANDBOX_PROVISION_TIMEOUT_MS`. A missing snapshot becomes `no_snapshot`, and one that exists but isn't available yet becomes `snapshot_not_ready`.
+4. Build the `RunnerInput` from the trace ID, transcript, the Sandbox's manifest and paths, the model, thinking level, and agent timeout, and run the runner once with `sandbox.run`. Runner stderr is streamed into the workflow logs with the model key redacted.
+5. Fold the runner's events into a capture ([`captureRun`](../src/tasks.ts)) and classify the run ([`classifyRun`](#failure-classification)). A failure is logged as an `investigation_failed` warning with its code and the runner's message (the model key redacted) and returned; a result goes through [`filterEvidence`](#evidence-filtering).
+6. Close the Sandbox in a `finally` block, whatever happened.
 
 The result carries the investigation result, the model and prompt version the runner reported, token usage, the manifest's creation time, and the commit of each repository.
 
@@ -390,14 +379,14 @@ Inside one `investigate` attempt, the agent's run is bounded several times over,
 1. The runner stops itself 10 seconds before `AGENT_TIMEOUT_MS`, measured from its own start, and reports a `timeout` error (exit code 3).
 2. [`run-investigation.sh`](../sandbox-runtime/run-investigation.sh) wraps the runner in coreutils `timeout` set to `AGENT_TIMEOUT_MS` (exit 124), with a `SIGKILL` 10 seconds later (exit 137).
 3. The host stops waiting 30 seconds after `AGENT_TIMEOUT_MS`.
-4. Render terminates the sandbox `SANDBOX_TIMEOUT_SECONDS` (30 minutes by default) after it was created, even if the workflow died.
+4. Render terminates the Sandbox `SANDBOX_TIMEOUT_SECONDS` (30 minutes by default) after it was created, even if the workflow died.
 5. Render stops the `investigate` attempt at its task timeout.
 
-`SANDBOX_TIMEOUT_SECONDS` is not derived from the other timeouts. If you raise `AGENT_TIMEOUT_MS` so that provisioning plus the agent's run could exceed it, raise `SANDBOX_TIMEOUT_SECONDS` too, or Render will terminate sandboxes mid-run.
+`SANDBOX_TIMEOUT_SECONDS` is not derived from the other timeouts. If you raise `AGENT_TIMEOUT_MS` so that provisioning plus the agent's run could exceed it, raise `SANDBOX_TIMEOUT_SECONDS` too, or Render will terminate Sandboxes mid-run.
 
 ### Failure classification
 
-The workflow retries a failure only when the sandbox failed, not the agent. Retrying an agent that ran and couldn't answer would spend the model budget again on the same likely outcome; a sandbox that died or lost its connection usually works on the next try.
+The workflow retries a failure only when the Sandbox failed, not the agent. Retrying an agent that ran and couldn't answer would spend the model budget again on the same likely outcome; a Sandbox that died or lost its connection usually works on the next try.
 
 [`classifyRun`](../src/tasks.ts) decides which is which from the run's exit status and captured events, in this order:
 
@@ -407,7 +396,7 @@ The workflow retries a failure only when the sandbox failed, not the agent. Retr
 4. An exit code below 128 with no result: the runner exited on its own without answering. This is `agent_error`.
 5. Anything else throws, which makes Render retry the attempt: the exec stream was lost before the exit status was known, the runner was killed with `SIGKILL` before its deadline (usually out of memory), or it died from another signal.
 
-Errors thrown while opening the sandbox (a failed restore, a `verify.sh` failure, a provisioning timeout, a rejected network policy) also propagate and are retried. Configuration errors and a missing snapshot are returned as failures rather than thrown, because retrying them can't help.
+Errors thrown while opening the Sandbox (a failed restore, a `verify.sh` failure, a provisioning timeout, a rejected network policy) also propagate and are retried. Configuration errors and a missing snapshot are returned as failures rather than thrown, because retrying them can't help.
 
 [`failureReason`](../src/tasks.ts) turns each failure code into the sentence users see:
 
@@ -421,11 +410,11 @@ Errors thrown while opening the sandbox (a failed restore, a `verify.sh` failure
 | `no_snapshot` | no repository snapshot is available: the first build hasn't finished, or recent builds failed and the last snapshot expired |
 | `invalid_question` | the question couldn't be read (at most 200 messages of up to 8,000 characters each) |
 
-The detailed cause of each failure is in the workflow's logs, not the reason: `workflow_misconfigured` for configuration errors, `invalid_question`, and the runner's stderr.
+The reasons above are abridged; the full sentences are in `failureReason`. The detailed cause of each failure is in the workflow's logs, not the reason: `investigation_failed` (the runner's failure code and message), `workflow_misconfigured`, `invalid_question`, and the runner's stderr. The quickstart's [log events](QUICKSTART.md#log-events) table lists them all.
 
 ### Evidence filtering
 
-The runner has already validated every citation against the checkout before accepting a submission (see [`submit.ts`](#submitts-citation-validation)). The host still doesn't trust what comes out of the sandbox, because the sandbox runs model-directed commands. [`filterEvidence`](../src/tasks.ts) checks each citation in a final answer against the manifest the host downloaded when it opened the sandbox:
+The runner has already validated every citation against the checkout before accepting a submission (see [`submit.ts`](#submitts-citation-validation)). The host still doesn't trust what comes out of the Sandbox, because the Sandbox runs model-directed commands. [`filterEvidence`](../src/tasks.ts) checks each citation in a final answer against the manifest the host downloaded when it opened the Sandbox:
 
 - A citation whose repository isn't in the manifest (compared case-insensitively), or whose commit isn't a prefix of that repository's manifest commit, is dropped and logged.
 - A kept citation is pinned to the manifest's spelling of the repository and its full 40-character commit.
@@ -464,8 +453,8 @@ export type OpenSandbox = (snapshotName: string, opts: { timeoutMs: number }) =>
 
 [`configureSandboxes`](../src/sandbox/index.ts) picks the implementation from `SANDBOX_PROVIDER`, defaulting to `render` on Render (which sets `RENDER=true`) and `local` everywhere else:
 
-- **Render** ([`src/sandbox/render/`](../src/sandbox/render)): `openRenderSandbox` restores a real Sandbox from the snapshot. Its `timeoutMs` (`SANDBOX_PROVISION_TIMEOUT_MS`, 5 minutes by default) is the deadline for creating the sandbox from the snapshot, waiting for it to boot, running `verify.sh`, and reading its manifest. If the deadline passes, the sandbox is terminated and the error propagates, so the workflow retries the attempt.
-- **Local** ([`src/sandbox/local.ts`](../src/sandbox/local.ts)): `localSandboxes` runs the runner as a child process against checkouts under `.scratch/repos/<owner>/<name>`, which stand in for the snapshot. It ignores the snapshot name and `timeoutMs`, because it restores nothing. It reads each checkout's commit and refuses one that's missing or has uncommitted or ignored files (the reply is then the `no_snapshot` failure), because citations against a dirty tree wouldn't match the commit. It bundles the runner into `.scratch/runner/` on first use, passes the model key as a file it deletes afterwards, strips `RENDER_API_KEY`, `SLACK_*`, `DATABASE_URL*`, `*_TOKEN`, and any variable holding the model key from the child's environment, and kills the runner's whole process group at the deadline. It provides no isolation at all; it exists for development and tests.
+- **Render** ([`src/sandbox/render/`](../src/sandbox/render)): `openRenderSandbox` restores a real Sandbox from the snapshot. Its `timeoutMs` (`SANDBOX_PROVISION_TIMEOUT_MS`, 5 minutes by default) is the deadline for creating the Sandbox from the snapshot, waiting for it to boot, running `verify.sh`, and reading its manifest. If the deadline passes, the Sandbox is terminated and the error propagates, so the workflow retries the attempt.
+- **Local** ([`src/sandbox/local.ts`](../src/sandbox/local.ts)): `localSandboxes` runs the runner as a child process against checkouts under `.scratch/repos/<owner>/<name>`, which stand in for the snapshot. It ignores the snapshot name and `timeoutMs`, because it restores nothing. It reads each checkout's commit and refuses one that's missing or has uncommitted, untracked, or ignored files (the reply is then the `no_snapshot` failure), because citations against a dirty tree wouldn't match the commit. It rebuilds the runner bundle in `.scratch/runner/` for each investigation, so edits to the runner or the prompt apply to the next question. It passes the model key as a file it deletes afterwards, strips `RENDER_API_KEY`, `SLACK_*`, `DATABASE_URL*`, `*_TOKEN`, and any variable holding the model key from the child's environment, and kills the runner's whole process group at the deadline. It provides no isolation at all; it exists for development and tests.
 
 This seam is how the whole workflow runs on a laptop and how most tests run, and it keeps the cloud-only code to the four files under `render/`.
 
@@ -474,10 +463,10 @@ This seam is how the whole workflow runs on a laptop and how most tests run, and
 ```mermaid
 sequenceDiagram
   participant Cron as Cron (hourly)
-  participant Builder as Builder sandbox
+  participant Builder as Builder Sandbox
   participant Snap as Named snapshot
   participant WF as Workflow (per question)
-  participant Sbx as Investigation sandbox
+  participant Sbx as Investigation Sandbox
 
   Cron->>Builder: create (allow-all egress)
   Cron->>Builder: upload scripts and runner, install tools, self-test
@@ -493,80 +482,81 @@ sequenceDiagram
   WF->>Sbx: terminate (in finally)
 ```
 
-The idea to take away: **expensive, privileged setup happens once, in a builder; every unit of work gets a fresh, unprivileged copy of the result.** Setup needs the network and git credentials; the work needs neither. Splitting them means the sandbox that runs untrusted commands never had those things.
+The idea to take away: **expensive, privileged setup happens once, in a builder; every unit of work gets a fresh, unprivileged copy of the result.** Setup needs the network and git credentials; the work needs neither. Splitting them means the Sandbox that runs untrusted commands never had those things.
 
 ### Building the snapshot
 
-**Essential.** [`rebuildSnapshot`](../src/sandbox/render/snapshot.ts), called by the cron, first resolves each repository's head with `git ls-remote` on the cron host (the token, if any, reaches git through the environment of that trusted process, never its arguments or a URL). [`buildSnapshot`](../src/sandbox/render/snapshot.ts) then creates a builder sandbox with `allow-all` egress and a `timeoutSeconds` backstop (`SANDBOX_BUILDER_TIMEOUT_SECONDS`, 1 hour by default) and drives it entirely through `upload` and `exec`:
+**Essential.** [`rebuildSnapshot`](../src/sandbox/render/snapshot.ts), called by the cron, first resolves each repository's head with `git ls-remote` on the cron host (the token, if any, reaches git through the environment of that trusted process, never its arguments or a URL). [`buildSnapshot`](../src/sandbox/render/snapshot.ts) then creates a builder Sandbox with `allow-all` egress and a `timeoutSeconds` backstop (`SANDBOX_BUILDER_TIMEOUT_SECONDS`, 1 hour by default) and drives it entirely through `upload` and `exec`:
 
-1. Upload one archive of everything the sandbox needs: the scripts in [`sandbox-runtime/`](../sandbox-runtime) and the runner, which [`bundleRunner`](../src/sandbox/runner-bundle.ts) builds on the spot into one self-contained JavaScript file with its packages and both prompt files inlined. The sandbox needs Node to run it, and nothing else: no npm, no `node_modules`.
+1. Upload one archive of everything the Sandbox needs: the scripts in [`sandbox-runtime/`](../sandbox-runtime) and the runner, which [`bundleRunner`](../src/sandbox/runner-bundle.ts) builds on the spot into one self-contained JavaScript file with its packages and both prompt files inlined. The Sandbox needs Node to run it, and nothing else: no npm, no `node_modules`.
 2. Install tools with [`install-tools.sh`](../sandbox-runtime/install-tools.sh), detect the Node path and the privilege-drop tool, create the unprivileged `investigator` user, write the env file the scripts read, and run the runner's `--self-test` as that user.
 3. Upload per-host git credentials, clone each repository at its exact commit with a detached `HEAD`, and scrub the credentials.
-4. Write the manifest of what was cloned, lock the filesystem down, delete the staging directory, run [`verify.sh`](../sandbox-runtime/verify.sh), and snapshot. The builder is terminated in a `finally` block whether or not the build succeeded.
+4. Write the manifest of what was cloned, lock the filesystem down, delete the staging directory, run [`verify.sh`](../sandbox-runtime/verify.sh) (which must confirm the runner is non-dumpable), and snapshot. The builder is terminated in a `finally` block whether or not the build succeeded.
 
 Three rules worth copying:
 
-- **Orchestrate from the host, script inside the sandbox.** The order of steps, timeouts, and error handling live in TypeScript, where they're tested against a fake Sandbox API ([`test/sandbox-render.test.ts`](../test/sandbox-render.test.ts)). Anything long or security-critical that runs inside is a real `.sh` file you can read, shellcheck, and test locally ([`test/sandbox-runtime.test.ts`](../test/sandbox-runtime.test.ts)).
+- **Orchestrate from the host, script inside the Sandbox.** The order of steps, timeouts, and error handling live in TypeScript, where they're tested against a fake Sandbox API ([`test/sandbox-render.test.ts`](../test/sandbox-render.test.ts)). Anything long or security-critical that runs inside is a real `.sh` file you can read, shellcheck, and test locally ([`test/sandbox-runtime.test.ts`](../test/sandbox-runtime.test.ts)).
 - **Order steps by trust.** Third-party code (the tool installer, and the bundled packages during the self-test) runs *before* any secret is uploaded. A test in `sandbox-render.test.ts` asserts this ordering.
-- **Ship artifacts; don't install in the sandbox.** Bundling on the host means the sandbox never runs a package manager: nothing to pin, no install scripts, and no registry access needed at build time.
+- **Ship artifacts; don't install in the Sandbox.** Bundling on the host means the Sandbox never runs a package manager: nothing to pin, no install scripts, and no registry access needed at build time.
 
 **Hardening.** `install-tools.sh` works on images with or without root and `apt-get`, verifying the checksum of anything it downloads (Node from nodejs.org, ripgrep from GitHub releases). Detecting the privilege-drop tool (`setpriv`, `runuser`, or `su`) and creating the user with `useradd` or `adduser` serve the same purpose: running on whatever base image the Sandbox has. If you control your base image, bake the tools in and delete most of this.
 
-**SDK gap.** The archive is uploaded as an opaque `.tgz` file and extracted in the sandbox, because the upload endpoint rejects an uncompressed tar of the bundled runner and doesn't accept the SDK's `application/gzip` content type.
+**SDK gap.** The archive is uploaded as an opaque `.tgz` file and extracted in the Sandbox, because the upload endpoint rejects an uncompressed tar of the bundled runner and doesn't accept the SDK's `application/gzip` content type.
 
 ### Snapshot by name, and prune
 
-**Essential.** The builder is snapshotted with a stable name (`snapshotName` in [`config.ts`](../config.ts), overridable with `SNAPSHOT_NAME`), and investigation sandboxes are created with `snapshotName`, which resolves to the newest available snapshot with that name. That indirection is what lets the cron replace the snapshot without coordinating with the workflow.
+**Essential.** The builder is snapshotted with a stable name (`snapshotName` in [`config.ts`](../config.ts), overridable with `SNAPSHOT_NAME`), and investigation Sandboxes are created with `snapshotName`, which resolves to the newest available snapshot with that name. That indirection is what lets the cron replace the snapshot without coordinating with the workflow.
 
 [`pruneSnapshots`](../src/sandbox/render/snapshot.ts) then deletes older available or failed snapshots with the same name, keeping the newest two. One is not enough: a question that started restoring just before a new build finished must still find its snapshot. Pruning logs instead of throwing, because a failed prune shouldn't fail a successful build. [`refreshSnapshot`](../src/cron.ts) wraps the whole rebuild and logs exactly one `snapshot_refresh` line either way, with `ok`, the snapshot ID, the repository count, the duration, and the error if any; the cron exits non-zero when the build failed. A failed build leaves the previous snapshot in place.
 
 **Essential.** When no snapshot exists yet, `create` fails with `SandboxSnapshotNotFoundError` or `SandboxSnapshotNotReadyError`. [`openRenderSandbox`](../src/sandbox/render/sandbox.ts) turns those into `SnapshotUnavailableError`, and the workflow replies that no snapshot is available, or that it isn't ready, instead of failing generically. These failures are not retried; the build won't finish in the seconds between retries.
 
-### One fresh sandbox per question
+### One fresh Sandbox per question
 
-**Essential.** [`openRenderSandbox`](../src/sandbox/render/sandbox.ts) creates a new sandbox for every question, and [`investigateTask`](../src/tasks.ts) closes it in a `finally` block. If anything fails after the sandbox is created but before it's handed back, `openRenderSandbox` terminates it itself. Two safety nets cover a crash between those points: `timeoutSeconds` on `create` (`SANDBOX_TIMEOUT_SECONDS`) makes Render terminate the sandbox on its own, and `terminate` treats a 404 as already terminated, so closing twice is harmless.
+**Essential.** [`openRenderSandbox`](../src/sandbox/render/sandbox.ts) creates a new Sandbox for every question, and [`investigateTask`](../src/tasks.ts) closes it in a `finally` block. If anything fails after the Sandbox is created but before it's handed back, `openRenderSandbox` terminates it itself. Two safety nets cover a crash between those points: `timeoutSeconds` on `create` (`SANDBOX_TIMEOUT_SECONDS`) makes Render terminate the Sandbox on its own, and `terminate` treats a 404 as already terminated, so closing twice is harmless.
 
-Reusing sandboxes would save the restore, about 15 seconds here, at the cost of one question's leftovers (files, processes, environment changes) leaking into the next. For untrusted work, take the fresh restore.
+Reusing Sandboxes would save the restore, about 15 seconds here, at the cost of one question's leftovers (files, processes, environment changes) leaking into the next. For untrusted work, take the fresh restore.
 
 ### Grant the least network access
 
-**Essential.** Investigation sandboxes use an `allow-list` policy with exactly one host: the model provider's API, read from the model's base URL in Pi's registry ([`investigateTask`](../src/tasks.ts)). `SANDBOX_ALLOWED_DOMAINS` overrides the derived host, and `SANDBOX_NETWORK_POLICY` can choose `allow-all` or `deny-all` instead. The builder always uses `allow-all`, because it needs the git hosts, and nodejs.org or GitHub releases when the base image lacks Node or ripgrep. It never runs the agent, and the only third-party code it runs (the tool installer and the runner's self-test) runs before any secret arrives.
+**Essential.** Investigation Sandboxes use an `allow-list` policy with exactly one host: the model provider's API, read from the model's base URL in Pi's registry ([`investigateTask`](../src/tasks.ts)). `SANDBOX_ALLOWED_DOMAINS` overrides the derived host, and `SANDBOX_NETWORK_POLICY` can choose `allow-all` or `deny-all` instead. The builder always uses `allow-all`, because it needs the git hosts, and nodejs.org or GitHub releases when the base image lacks Node or ripgrep. It never runs the agent, and the only third-party code it runs (the tool installer and the runner's self-test) runs before any secret arrives.
 
-Internally, a policy is `{ type, domains }` ([`NetworkPolicy`](../src/sandbox/render/config.ts)), and [`wirePolicy`](../src/sandbox/render/sandbox.ts) converts it to the API's shape, `{ type, rules: [{ domain, protocol: "https" }] }`.
+Internally, a policy is `{ type, domains }` ([`NetworkPolicy`](../src/sandbox/render/config.ts)), and [`wirePolicy`](../src/sandbox/render/sandbox.ts) converts it to the shape the API accepts, `{ type, rules: [{ domain, protocol: "https" }] }` (see [Calling the API](#calling-the-api) for why the SDK's own shape doesn't work).
 
 Three details in `openRenderSandbox`:
 
 - An `allow-list` policy with no domains is refused before anything is created.
 - If the workspace rejects `allow-list` (400 or 422), the error says so and tells you how to choose another policy, instead of passing along a bare 400.
-- If Render returns a sandbox with a different policy than requested, the sandbox is terminated rather than used. Never run with wider egress than you asked for.
+- If Render returns a Sandbox with a different policy than requested, the Sandbox is terminated rather than used. Never run with wider egress than you asked for.
 
 [The security boundary](#known-residual-risk-dns) describes what the allow-list doesn't cover (DNS).
 
 ### Verify before you trust
 
-**Essential.** [`verify.sh`](../sandbox-runtime/verify.sh) runs on the builder before the snapshot *and* on every restored sandbox before it gets work. It fails unless:
+**Essential.** [`verify.sh`](../sandbox-runtime/verify.sh) runs on the builder before the snapshot *and* on every restored Sandbox before it gets work. It fails unless:
 
 - `git`, `rg`, and `timeout` are present and Node is version 22 or later,
 - no credential store, credential helper, `insteadOf` rewrite, extra header, or credential-bearing remote URL survived, in the system, global, or any repository's config,
 - every repository's `HEAD` matches the manifest and its working tree is clean,
 - the runner passes its `--self-test`,
+- the runner user can't read the runner's memory, when the check can run (see the hardening note below),
 - the repositories aren't writable by the runner user, and scratch is.
 
-On restored sandboxes, the host also passes egress probes, run as the runner user: under `allow-list` or `deny-all`, `https://example.com` must be unreachable, and under `allow-list`, the first allowed domain must be reachable. `verify.sh` finishes by clearing scratch and printing one JSON line describing the sandbox, which the workflow logs as `sandbox ready`: the runner user and uid, the privilege-drop tool, Node, Pi and prompt versions, whether the runner is non-dumpable, and whether DNS resolves.
+On restored Sandboxes, the host also passes egress probes, run as the runner user: under `allow-list` or `deny-all`, `https://example.com` must be unreachable, and under `allow-list`, the first allowed domain must be reachable. `verify.sh` finishes by clearing scratch and printing one JSON line describing the Sandbox, which the workflow logs as `sandbox ready`: the runner user and uid, the privilege-drop tool, Node, Pi and prompt versions, whether the runner is non-dumpable, and whether DNS resolves.
 
-The point is to check the sandbox you actually got instead of trusting the steps that built it. A misconfigured snapshot, or one built by an older version of this repository, fails loudly at verification instead of quietly running work with the wrong permissions.
+The point is to check the Sandbox you actually got instead of trusting the steps that built it. A misconfigured snapshot, or one built by an older version of this repository, fails loudly at verification instead of quietly running work with the wrong permissions.
 
-**Hardening.** The memory-access probe starts the runner's Node binary as the runner user and confirms that the same user can't read its `/proc/<pid>/maps`. That proves the binary is execute-only, so commands the agent runs can't read the API key from the runner's memory through `/proc` (see [Filesystem isolation](#filesystem-isolation)). This matters only when untrusted code shares a sandbox with a secret. The probe can run only as root; `openRenderSandbox` refuses any restored sandbox where it didn't run and pass.
+**Hardening.** The memory-access probe starts the runner's Node binary as the runner user and confirms that the same user can't read its `/proc/<pid>/maps`. That proves the binary is execute-only, so commands the agent runs can't read the API key from the runner's memory through `/proc` (see [Filesystem isolation](#filesystem-isolation)). This matters only when untrusted code shares a Sandbox with a secret. The probe can run only as root. When it can't run, `verify.sh` still succeeds but reports `runnerNonDumpable: false`, so both callers enforce the result: [`buildSnapshot`](../src/sandbox/render/snapshot.ts) fails the build instead of taking a snapshot that every restore would refuse, and `openRenderSandbox` refuses the restored Sandbox before it gets the model key. A probe that runs and can read the runner's memory fails `verify.sh` outright.
 
 ### Keep credentials short-lived
 
 **Essential.** Git tokens exist only during the builder's clone step:
 
-- They are uploaded as files, one per host (`/tmp/researcher-stage/creds/<host>`), never put in a command, a URL, or an environment variable inside the sandbox. Commands and environment variables show up in process listings, and URLs end up in `.git/config`.
+- They are uploaded as files, one per host (`/tmp/researcher-stage/creds/<host>`), never put in a command, a URL, or an environment variable inside the Sandbox. Commands and environment variables show up in process listings, and URLs end up in `.git/config`.
 - Git reads them through [`git-credential-staged.sh`](../sandbox-runtime/build/git-credential-staged.sh), which answers only for plain host names that have a file.
 - [`scrub-credentials.sh`](../sandbox-runtime/build/scrub-credentials.sh) then fails the build if any token value appears in a git config, a credential store, or a repository's `.git` directory, deletes the files, and checks again that no credential settings remain. It searches with `grep -F -f` reading from a file, so the token never appears in a command line either. Both scripts live in the staging directory, which is deleted before the snapshot.
 
-**Essential.** The model API key goes to each investigation sandbox the same way: as a file next to the run's input, which the runner deletes as soon as it has read it, and which `run-investigation.sh` deletes again on exit regardless ([`runInvestigation`](../src/sandbox/render/sandbox.ts), [`run-investigation.sh`](../sandbox-runtime/run-investigation.sh)). Commands the agent runs get an environment built from an allowlist, so the key isn't in it.
+**Essential.** The model API key goes to each investigation Sandbox the same way: as a file next to the run's input, which the runner deletes as soon as it has read it, and which `run-investigation.sh` deletes again on exit regardless ([`runInvestigation`](../src/sandbox/render/sandbox.ts), [`run-investigation.sh`](../sandbox-runtime/run-investigation.sh)). Commands the agent runs get an environment built from an allowlist, so the key isn't in it.
 
 ### Run work and get results back
 
@@ -576,7 +566,7 @@ The point is to check the sandbox you actually got instead of trusting the steps
 2. `exec` the job script and stream its stderr to the host. The script writes structured results to one file and its exit status to another.
 3. `download` the results file and parse it into `RunnerEvent`s, counting lines that don't parse.
 
-**SDK gap.** If the exec stream drops, the job keeps running inside the sandbox, but the API can't reattach to it. So the host polls for the exit-status file until it appears or the sandbox stops running. Writing results to files instead of relying on the stream is what makes that recovery possible.
+**SDK gap.** If the exec stream drops, the job keeps running inside the Sandbox, but the API can't reattach to it. So the host polls for the exit-status file until it appears or the Sandbox stops running. Writing results to files instead of relying on the stream is what makes that recovery possible.
 
 **Hardening.** The results file (`/tmp/run-<uuid>.jsonl`) and the exit-status file (`/tmp/run-<uuid>.exit`) sit beside the run directory, not inside it. The run directory is handed to the runner user; these files are created by the root-owned script in sticky `/tmp`, so the runner user can't overwrite what the host will read.
 
@@ -587,12 +577,12 @@ The point is to check the sandbox you actually got instead of trusting the steps
 | Behavior | Why |
 |---|---|
 | Spacing requests out (`RENDER_API_MIN_INTERVAL_MS`, 1 second by default) | The Sandbox API allows 100 requests a minute per workspace; the SDK doesn't throttle |
-| Retrying 429 and 503 | The SDK surfaces them as errors. `create` retries only 429, which the API never processes, so a retry can't create a second sandbox |
-| `waitRunning` | `create` returns while the sandbox is still `creating`, and there's no wait helper |
-| Retrying 404 just after create | A new sandbox briefly answers 404 to `get` and `exec` |
+| Retrying 429 and 503 | The SDK surfaces them as errors. `create` retries only 429, which the API never processes, so a retry can't create a second Sandbox |
+| `waitRunning` | `create` returns while the Sandbox is still `creating`, and there's no wait helper |
+| Retrying 404 just after create | A new Sandbox briefly answers 404 to `get` and `exec` |
 | Collecting `exec` output | The SDK returns the raw event stream; `exec` gathers stdout, stderr, and the exit code, and `check` throws on a non-zero exit |
-| Sending network policies as `type` plus `rules` ([`wirePolicy`](../src/sandbox/render/sandbox.ts)) | The API replaced `default` plus `allowedDomains`; 1.2.0's types still describe the old shape, and the API ignores `allowedDomains`, rejecting the allow-list as empty |
-| Uploading the stage archive as a `.tgz` file and extracting it in the sandbox ([`buildSnapshot`](../src/sandbox/render/snapshot.ts)) | The upload endpoint rejects an uncompressed tar of the bundled runner, and doesn't accept the SDK's `application/gzip` type |
+
+Two more SDK gaps are handled outside the client: [`wirePolicy`](../src/sandbox/render/sandbox.ts) sends network policies as `type` plus `rules`, because the API replaced `default` plus `allowedDomains` and 1.2.0's types still describe the old shape (the API ignores `allowedDomains` and rejects the allow-list as empty), and `buildSnapshot` uploads its archive as a `.tgz` (see [Building the snapshot](#building-the-snapshot)).
 
 Pacing is per `SandboxClient`, and each task run creates its own, so many questions arriving at once can still exceed the workspace limit; the 429 retries then slow restores down rather than failing them.
 
@@ -600,15 +590,15 @@ Pacing is per `SandboxClient`, and each task run creates its own, so many questi
 
 ## The runner
 
-The runner is the program that runs inside the sandbox and drives the agent. Its source is [`src/runner/`](../src/runner); [`bundleRunner`](../src/sandbox/runner-bundle.ts) bundles it with esbuild into one `runner.mjs` file, inlining its packages, [`core-prompt.md`](../src/runner/core-prompt.md), and [`prompt.md`](../prompt.md) (which must stay under 20 KB). The agent is built on the Pi libraries: `@earendil-works/pi-ai` for the model catalog and provider clients, and `@earendil-works/pi-agent-core` for the agent loop and the base read and bash tools.
+The runner is the program that runs inside the Sandbox and drives the agent. Its source is [`src/runner/`](../src/runner); [`bundleRunner`](../src/sandbox/runner-bundle.ts) bundles it with esbuild into one `runner.mjs` file, inlining its packages, [`core-prompt.md`](../src/runner/core-prompt.md), and [`prompt.md`](../prompt.md) (which must stay under 20 KB). The agent is built on the Pi libraries: `@earendil-works/pi-ai` for the model catalog and provider clients, and `@earendil-works/pi-agent-core` for the agent loop and the base read and bash tools.
 
-Because the runner is baked into the snapshot, changes to `src/runner/`, `prompt.md`, `config.ts`, or `sandbox-runtime/` reach investigations only after the next snapshot build.
+Because the runner is baked into the snapshot, changes to `src/runner/`, `prompt.md`, the repository list in `config.ts`, or `sandbox-runtime/` reach investigations only after the next snapshot build.
 
 ### The protocol between host and runner
 
 [`src/runner/protocol.ts`](../src/runner/protocol.ts) is the whole contract, and the host and runner share it:
 
-- **Input**: `RunnerInput` as JSON on stdin: the trace ID, the transcript, the manifest, `repos_root` and `scratch_dir` (which come from the sandbox), the model provider and model, the thinking level, and `timeout_ms`.
+- **Input**: `RunnerInput` as JSON on stdin: the trace ID, the transcript, the manifest, `repos_root` and `scratch_dir` (which come from the Sandbox), the model provider and model, the thinking level, and `timeout_ms`.
 - **Arguments**: `runner.mjs [--key-file PATH] [--faux] [--self-test]`.
 - **Output**: one `RunnerEvent` JSON object per line on stdout. The types are `started` (Pi version, model, prompt version), `tool_call`, `tool_result` (with an output preview of at most 2,000 characters), `assistant_text`, `usage` (tokens and cost per model response), and exactly one terminal event: `result` (an `InvestigationResult`) or `error` (with a code). Every event has an `at` timestamp.
 - **Stderr**: free-form logs, which the host streams into the workflow logs.
@@ -673,7 +663,7 @@ Each `bash` command first goes through [`rejectReason`](../src/runner/tools.ts),
 - `chmod`, `chown`, and `chgrp` outside scratch,
 - any of the above inside `sh -c`, `bash -c`, or `eval`.
 
-The policy is a **usability guard, not a security boundary**. Its parsing is approximate and can be bypassed: nothing stops `node -e` or `python -c` from doing what `curl` would. Its job is to give the model a clear message ("the checkouts are read-only and there is no network") so it adapts instead of burning turns on commands that would fail anyway. The real write barrier is the snapshot's file permissions; the real network barrier is the sandbox's egress policy.
+The policy is a **usability guard, not a security boundary**. Its parsing is approximate and can be bypassed: nothing stops `node -e` or `python -c` from doing what `curl` would. Its job is to give the model a clear message ("the checkouts are read-only and there is no network") so it adapts instead of burning turns on commands that would fail anyway. The real write barrier is the snapshot's file permissions; the real network barrier is the Sandbox's egress policy.
 
 ### `submit.ts`: citation validation
 
@@ -688,7 +678,7 @@ The policy is a **usability guard, not a security boundary**. Its parsing is app
 
 A rejected submission records nothing and comes back to the model as a tool error listing every problem, with hints for common mistakes such as an absolute path or a path that repeats the repository name. The model gets three attempts in total. An accepted submission is normalized, with the full commit and a normalized path, and any later call is ignored. The tool runs sequentially, so two submissions in one batch can't race.
 
-The host repeats part of this check in [`filterEvidence`](#evidence-filtering), because it doesn't trust what comes out of the sandbox.
+The host repeats part of this check in [`filterEvidence`](#evidence-filtering), because it doesn't trust what comes out of the Sandbox.
 
 ### `faux.ts`: running without a model
 
@@ -706,17 +696,21 @@ The runner's Node binary is installed as an execute-only copy (mode `0711`, owne
 
 ### Credential separation
 
-Git tokens exist only during the builder's clone phase. They arrive as per-host files uploaded after the install phase (which runs the tool installer and the runner's self-test, both of which execute third-party code). After cloning, [`scrub-credentials.sh`](../sandbox-runtime/build/scrub-credentials.sh) verifies that no token value appears in any git config, `.git/` directory, or global credential store, and deletes the files. The snapshot is taken only after this check and `verify.sh` pass. Investigation sandboxes restored from the snapshot never see git tokens.
-
-The model API key is delivered to each investigation sandbox as a one-time file. The runner reads it, deletes it, and removes every provider key variable from `process.env` before starting the agent. Tool subprocesses get an environment built from an allowlist, so even if the agent constructs a command that reads environment variables, it finds nothing. The key is also redacted from every event line the runner writes and from the runner stderr the workflow logs.
+Git tokens exist only in the builder, only after the steps that run third-party code, and only until the clone finishes; a scrub step fails the build if any trace of them remains, so investigation Sandboxes never see them. The model API key reaches each investigation Sandbox as a one-time file. The runner deletes it on read and removes every provider key variable from `process.env`, and tool subprocesses get an environment built from an allowlist, so a command that reads environment variables finds nothing. The key is also redacted from every event line the runner writes and from the runner stderr the workflow logs. [Keep credentials short-lived](#keep-credentials-short-lived) describes the mechanics.
 
 ### Network policy
 
-Investigation sandboxes are created with an allow-list network policy containing only the model provider's API host, derived automatically from the model's base URL in Pi's registry. The builder always uses allow-all because it needs to reach git hosts, and nodejs.org or GitHub releases when the base image lacks Node or ripgrep. Under allow-list, every restored sandbox proves its policy with egress probes before it gets work: one host that must be blocked and the allowed host, which must be reachable.
+By default, investigation Sandboxes allow HTTPS to one host, the model provider's API, and prove it with egress probes before they get work. The builder uses allow-all, but it never runs the agent and receives git tokens only after its third-party code has run. [Grant the least network access](#grant-the-least-network-access) describes the details.
+
+### What verification guarantees
+
+The filesystem, credential, and network properties above are checked on each Sandbox, not assumed. [`verify.sh`](../sandbox-runtime/verify.sh) runs on the builder before the snapshot and on every restored Sandbox before it gets work, and a failure on either stops the build or the investigation (see [Verify before you trust](#verify-before-you-trust)). The non-dumpable check is required in both places: a builder that can't confirm it produces no snapshot, and a restored Sandbox that can't confirm it never receives the model key.
+
+Local sandboxes (`SANDBOX_PROVIDER=local`) provide no isolation at all: the runner and the agent's commands run as you, on your machine, with your network. They exist for development and tests.
 
 ### Known residual risk: DNS
 
-The allow-list policy blocks connections to hosts not on the list, but DNS resolution still works for arbitrary names. An adversarial model could encode data in DNS queries (as subdomain labels, for example) to exfiltrate the API key or investigation content. `verify.sh` checks whether DNS resolves, and the result is logged as `dnsResolves` with every sandbox.
+The allow-list policy blocks connections to hosts not on the list, but DNS resolution still works for arbitrary names. An adversarial model could encode data in DNS queries (as subdomain labels, for example) to exfiltrate the API key or investigation content. `verify.sh` checks whether DNS resolves, and the result is logged as `dnsResolves` with every Sandbox.
 
 This is accepted as a residual risk for several reasons: the API key should be spend-capped, the key is held only in the memory of a non-dumpable process, and DNS exfiltration is low-bandwidth and noisy. A custom DNS resolver that refuses queries for names outside the allow-list would close it; that isn't implemented.
 
@@ -728,13 +722,7 @@ The service answers with quoted, linked lines from every configured repository, 
 
 The allow-list admits one host, the model provider's API, but that host serves all of the provider's customers. The read-only shell policy is a usability guard, not a boundary (see [`tools.ts`](#toolsts-the-read-only-tools)), so an agent steered by instructions planted in a repository or a question could send source code to that host under a different account's API key, for example with `node -e "fetch(...)"`. The egress policy can't tell one key from another.
 
-This is accepted because the provider already receives the code the agent reads as part of normal operation, the agent's tool environment holds no credentials to misuse, and the attack needs a key the attacker controls. Brokering the credential outside the sandbox, so that requests can only go out under your account, would close it.
-
-### What verification guarantees
-
-[`verify.sh`](../sandbox-runtime/verify.sh) runs as root in Render sandboxes, where it checks that the runner is non-dumpable by trying to read the runner's `/proc/<pid>/maps` as the runner user. It can only make that check as root, so `openRenderSandbox` refuses any sandbox where the check didn't run and pass. The builder runs the same script but doesn't require the check, so a snapshot built somewhere it couldn't run would be refused at every restore rather than used.
-
-Local sandboxes (`SANDBOX_PROVIDER=local`) provide no isolation at all: the runner and the agent's commands run as you, on your machine, with your network. They exist for development and tests.
+This is accepted because the provider already receives the code the agent reads as part of normal operation, the agent's tool environment holds no credentials to misuse, and the attack needs a key the attacker controls. Brokering the credential outside the Sandbox, so that requests can only go out under your account, would close it.
 
 ## Out of scope
 

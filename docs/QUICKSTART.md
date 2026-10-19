@@ -179,7 +179,7 @@ The local provider bundles the runner into `.scratch/runner/` each time an inves
 
 ### Run without a model: `--faux`
 
-`LOCAL_RUNNER_ARGS=--faux` makes the runner follow a deterministic script instead of calling a model. It lists the repositories root, reads the latest commit of the first repository, reads that repository's README (or its first tracked file), and submits a low-confidence answer citing it. This exercises the real tools, citation validation, and event stream with no API key and no network. Include the word "clarify" in the question to get a clarification instead.
+`LOCAL_RUNNER_ARGS=--faux` makes the runner follow a fixed script instead of calling a model: it reads the first repository's latest commit and README through the real tools, then submits a low-confidence answer citing the README, which goes through the real citation check. No API key or network is needed. Include the word "clarify" in the question to get a clarification instead. The walkthrough's [`faux.ts`](WALKTHROUGH.md#fauxts-running-without-a-model) section has the details.
 
 To run a real investigation, drop `LOCAL_RUNNER_ARGS` and set your model key (for example `ANTHROPIC_API_KEY`) in terminal 1.
 
@@ -486,7 +486,7 @@ Every variable is also listed, with comments, in [`.env.example`](../.env.exampl
 
 ### Log events
 
-Every service writes one JSON object per line: `{"level", "msg", "event"?, ...fields}`. Workflow lines also carry `task` (`answer_question` or `investigate`), and errors appear in an `err` field as `{name, message}`. Search for these `event` values:
+Every service writes one JSON object per line: `{"level", "msg", "event"?, ...fields}`. Workflow lines also carry `task` (`answer_question` or `investigate`). An `err` field holds a serialized error, `{name, message}`; an `error` field holds just the message. Search for these `event` values:
 
 | Service | `event` | Level | Fields | Meaning |
 |---|---|---|---|---|
@@ -503,16 +503,19 @@ Every service writes one JSON object per line: `{"level", "msg", "event"?, ...fi
 | API | `task_start_failed` | error | `event_id`, `error` | Starting a run from Slack failed; the thread gets a failure reply |
 | API | `failure_reply_failed` | error | `event_id`, `error` | Posting that failure reply also failed |
 | Workflow | `turn_finished` | info | `trace_id`, `outcome`, `model`, `prompt_version`, `repos`, `usage`, `cost_usd`, `duration_ms` | One question finished; `repos` lists the commit of each repository it read |
+| Workflow | `investigation_failed` | warn | `trace_id`, `code`, `message` | The agent ran but produced no answer. `code` is the failure code (`timeout`, `no_submission`, `invalid_submission`, `invalid_input`, or `agent_error`) and `message` is the runner's explanation, with the model key redacted |
 | Workflow | `workflow_misconfigured` | warn | `provider` and `model`, or `err` | An unknown model, or bad Sandbox configuration, stopped the investigation |
 | Workflow | `invalid_question` | warn | `trace_id`, `error` | The run's input failed validation; the caller gets a failure reply |
 | Workflow | `deliver_failed` | error | `trace_id`, `err` | The callback still failed after every retry |
 | Cron | `snapshot_refresh` | info or error | `ok`, `snapshot_id`, `snapshot_name`, `repos`, `duration_ms`, `error` | A snapshot build finished (`ok: true`, with `repos` the count) or failed (`ok: false`, with `error`) |
 
-A few warnings have a `msg` but no `event`:
+A few lines have a `msg` but no `event`:
 
-- `could not terminate sandbox` (`sandbox_id`, `err`), from the workflow or the cron: a Sandbox couldn't be terminated. Render still terminates it when its timeout (`SANDBOX_TIMEOUT_SECONDS` or `SANDBOX_BUILDER_TIMEOUT_SECONDS`) runs out.
-- `snapshot prune failed` (`snapshot_name`, `err`), from the cron: older snapshots weren't deleted. The new snapshot is still in place and the build still counts as a success.
-- `investigation failed` (`trace_id`, `err`), from the workflow: the `investigate` subtask failed on every attempt, and the reply says "the investigation kept failing on infrastructure errors".
+- `investigation failed` (error; `trace_id`, `err`), from `answer_question`: the `investigate` subtask threw on every attempt, and the reply says "the investigation kept failing on infrastructure errors". Don't confuse it with the `investigation_failed` event above, which means the agent ran and didn't answer.
+- `could not terminate sandbox` (warn; `sandbox_id`, `err`), from the workflow or the cron: a Sandbox couldn't be terminated. Render still terminates it when its timeout (`SANDBOX_TIMEOUT_SECONDS` or `SANDBOX_BUILDER_TIMEOUT_SECONDS`) runs out.
+- `snapshot prune failed` (warn; `snapshot_name`, `err`), from the cron: older snapshots weren't deleted. The new snapshot is still in place and the build still counts as a success.
+- `dropped evidence not in the sandbox manifest` (warn; `dropped`), from `investigate`: the host removed citations that didn't match the Sandbox's manifest before replying.
+- `sandbox ready` (info; `sandbox_id`, the runner user, Node, Pi, and prompt versions, `runnerNonDumpable`, `dnsResolves`), from `investigate`: a restored Sandbox passed verification.
 
 Every reply carries a trace ID, the workflow's task run ID. To find a question's run, open the workflow service's task runs in the Dashboard and search for it. The cron's `snapshot_refresh` line is the one to alert on: alert when `ok` is false on consecutive runs. A failed build leaves the previous snapshot in place.
 
@@ -532,7 +535,7 @@ Start with the logs of the service named in each case.
 **Every question fails with "the investigation kept failing on infrastructure errors".** Open `codebase-researcher-workflow`'s logs and its failed `investigate` runs, and find the error behind the retries:
 
 - `Render rejected networkPolicy allow-list`: your workspace doesn't accept allow-list egress. Set `SANDBOX_NETWORK_POLICY=allow-all` on the workflow service. This lets investigation Sandboxes reach any host, so weigh the [security boundary](WALKTHROUGH.md#the-security-boundary) first.
-- `verify.sh exited`, `unexpected sandbox info line`, or `could not confirm the runner is non-dumpable`: the restored Sandbox failed verification, and the message says which check. A snapshot built by an older version of this repository fails here; trigger the snapshot cron.
+- `verify.sh exited`, `unexpected sandbox info line`, or `could not confirm the runner is non-dumpable`: the restored Sandbox failed verification, and the message says which check. A snapshot built by an older version of this repository can fail here; trigger the snapshot cron.
 - `could not open a sandbox ... within 300000ms (SANDBOX_PROVISION_TIMEOUT_MS)`: restores are slow, usually because many questions arrived together and are sharing the Sandbox API rate limit. Raise `SANDBOX_PROVISION_TIMEOUT_MS`, or expect fewer concurrent questions (see [Operating limits](#operating-limits)).
 
 **Every question fails with "the investigation service is misconfigured".** Find `workflow_misconfigured` in the workflow's logs:
@@ -541,12 +544,14 @@ Start with the logs of the service named in each case.
 - With an `err` that says `RENDER_WORKSPACE_ID is required: the API key has access to multiple workspaces`: set `RENDER_WORKSPACE_ID` on the workflow service and the cron to the workspace's `tea-…` ID.
 - With an `err` that mentions `RENDER_API_KEY is required for Render sandboxes`: set the key on the workflow service.
 
-**Every question fails with "the agent stopped without submitting an answer".** Check that the provider's key is set on the workflow service and is valid. A missing or rejected key ends the run before the agent can submit.
+**Every question fails with "the agent stopped without submitting an answer".** Find `investigation_failed` in the workflow's logs; its `code` and `message` say why. The usual cause is the model key: `agent_error` with `no API key for provider` means it isn't set on the workflow service, and an authentication error from the provider means it's invalid.
 
 **Questions fail with "the repository snapshot isn't ready" or "no repository snapshot is available".** Trigger `codebase-researcher-snapshots` and read its `snapshot_refresh` line. When `ok` is false, `error` names the step:
 
 - `git ls-remote <repo>`: the repository is private and `GITHUB_TOKEN` is missing or lacks access, or the name in `config.ts` is wrong.
 - `RENDER_WORKSPACE_ID is required`: set it on the cron, as above.
+- `could not confirm the runner is non-dumpable in builder`: `verify.sh` couldn't run its memory-access check, which needs root, in the builder Sandbox. The build stops without taking a snapshot, because every restore would refuse it. The previous snapshot stays in place.
+- `verify.sh exited` or `credential scrub failed`: the builder failed a lockdown check, and the message says which one.
 - A run that stops without a `snapshot_refresh` line ran out of memory. The cron needs the Standard plan.
 
 **The Slack bot never answers.** Check the API service's logs:
@@ -568,7 +573,7 @@ These come from the platform and shape how far one deployment goes:
 - **Region:** Oregon only, during early access.
 - **Run retention:** Render keeps each workflow run's input and result for 30 days. After that, `GET /v1/questions/:id` returns 404. Until then, transcripts and callback secrets are visible to anyone with access to the workflow service in the Dashboard.
 - **Snapshot expiry:** snapshots use Render's default lifetime. The hourly cron keeps a fresh one available. If builds fail long enough for the last snapshot to expire, questions fail until a build succeeds.
-- **Timeouts:** each `investigate` attempt gets `SANDBOX_PROVISION_TIMEOUT_MS` to open its Sandbox, `AGENT_TIMEOUT_MS` for the agent, and 5 more minutes for setup, collecting output, and cleanup: 25 minutes with the defaults. Infrastructure failures are retried twice, so in the worst case a failing question takes about 75 minutes to report back.
+- **Timeouts:** each `investigate` attempt gets `SANDBOX_PROVISION_TIMEOUT_MS` to open its Sandbox, `AGENT_TIMEOUT_MS` for the agent, and 5 more minutes for setup, collecting output, and cleanup: 25 minutes with the defaults. Infrastructure failures are retried twice, so in the worst case a failing question takes about 75 minutes to report back. The walkthrough's [retries and timeouts](WALKTHROUGH.md#retries-and-timeouts) section has the full calculation.
 
 ### Measured numbers
 

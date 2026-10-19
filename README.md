@@ -48,7 +48,7 @@ A reader can follow each link to the exact lines and decide for themselves.
 
 ## How a question flows
 
-1. A caller posts a question to `POST /v1/questions`, or mentions the bot in Slack, which starts the same kind of run. The API starts an `answer_question` workflow run and returns `202 { id }`.
+1. A caller posts a question to `POST /v1/questions`, or someone mentions the bot in Slack. Either way, the API service starts an `answer_question` workflow run; over HTTP it returns `202 { id }` right away.
 2. The workflow's `investigate` subtask restores a fresh Sandbox from the current repository snapshot and verifies that it is locked down.
 3. Inside the Sandbox, the runner starts the coding agent with the conversation and the list of repositories and commits. The agent reads code, git history, and search results through read-only tools, then calls `submit_investigation`. Every cited file, commit, and line range is checked against the checkout before the submission is accepted.
 4. The workflow returns the result. If the caller included a callback URL, the `deliver` subtask POSTs the signed result to it.
@@ -59,7 +59,7 @@ A reader can follow each link to the exact lines and decide for themselves.
 
 - Every question gets its own Sandbox, restored from an immutable snapshot. No state carries between questions.
 - Repositories are root-owned and read-only inside the Sandbox, and the runner runs as an unprivileged user.
-- The model API key arrives as a one-time file that the runner deletes on read. The runner's Node binary is execute-only, so the agent's commands can't read the key from its memory. Each restored Sandbox must prove this before it gets work.
+- The model API key arrives as a one-time file that the runner deletes on read. The runner's Node binary is execute-only, so the agent's commands can't read the key from its memory. The snapshot build and every restored Sandbox must prove this, or the build fails and the Sandbox gets no work.
 - HTTP(S) egress is limited to the model provider's API host, derived from the configured model. DNS still resolves arbitrary names.
 - Git tokens exist only in the builder Sandbox while it clones. They are scrubbed and verified absent before the snapshot is taken.
 - Anyone who can ask the bot can read the configured repositories through it, so limit who can ask.
@@ -85,8 +85,6 @@ curl -X POST https://<your-api-service>.onrender.com/v1/questions \
 Then poll `GET /v1/questions/<id>` with the same token until the status is `completed`. An investigation usually takes one to two minutes.
 
 To try it on your machine first, without a Sandbox or a model key, clone a couple of repositories into `.scratch/repos/` and run the workflow and the API locally with the runner's `--faux` mode, which follows a fixed script instead of calling a model. [Run it locally](docs/QUICKSTART.md#run-it-locally) has the commands.
-
-[docs/QUICKSTART.md](docs/QUICKSTART.md) covers each step in detail, plus connecting Slack, customizing the bot, configuration, and operations.
 
 ## Learn more
 
