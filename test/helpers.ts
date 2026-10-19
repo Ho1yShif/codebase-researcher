@@ -27,7 +27,7 @@ export async function makeRepo(root: string, repository: string): Promise<{ path
   return { path, commit: await git(["rev-parse", "HEAD"], { cwd: path }) };
 }
 
-export async function commitAll(path: string, message: string): Promise<string> {
+async function commitAll(path: string, message: string): Promise<string> {
   await git([...ident, "add", "-A"], { cwd: path });
   await git([...ident, "commit", "-q", "-m", message], { cwd: path });
   return git(["rev-parse", "HEAD"], { cwd: path });

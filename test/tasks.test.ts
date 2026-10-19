@@ -1,24 +1,28 @@
-import type { Evidence, InvestigationResult } from "../src/investigation.ts";
-import type { RunnerEvent } from "../src/runner/protocol.ts";
-import { defineConfig } from "../src/bot-config.ts";
-import { createFakeSlack, FakeSandboxes } from "./fakes.ts";
-import { describe, expect, it } from "vitest";
-import { loadConfig } from "../src/workflow.ts";
-import { createLog } from "../src/log.ts";
-import { answerQuestion, investigateTask, deliverCallback } from "../src/tasks.ts";
-import type { AnswerQuestionDeps, InvestigateResult, InvestigateDeps, DeliverInput } from "../src/tasks.ts";
 import { createServer } from "node:http";
+import { describe, expect, it } from "vitest";
+import { verifyCallback } from "../src/callback.ts";
+import type { Evidence, InvestigationResult } from "../src/investigation.ts";
+import { createLog } from "../src/log.ts";
+import type { RunnerEvent } from "../src/runner/protocol.ts";
+import type { OpenSandbox } from "../src/sandbox/interface.ts";
+import { answerQuestion, deliverCallback, investigateTask, type DeliverInput, type InvestigateInput } from "../src/tasks.ts";
+import {
+  DELIVER_MAX_RETRIES,
+  DELIVER_TIMEOUT_S,
+  INVESTIGATE_MAX_RETRIES,
+  investigateTimeoutSeconds,
+  loadConfig,
+  parentTimeoutSeconds,
+} from "../src/workflow.ts";
+import { FakeSandboxes, TEST_MANIFEST, type Script } from "./fakes.ts";
 
 const at = () => new Date().toISOString();
+const MODEL_KEY = "sk-ant-api03-tasksTestSecret";
 
 const events = {
-  started: (): RunnerEvent => ({
-    type: "started", at: at(), pi_version: "0.83.0", model: "claude-sonnet-4-5", prompt_version: "v1",
-  }),
+  started: (): RunnerEvent => ({ type: "started", at: at(), pi_version: "0.83.0", model: "claude-sonnet-4-5", prompt_version: "v1" }),
   result: (result: InvestigationResult): RunnerEvent => ({ type: "result", at: at(), result }),
-  error: (code: Extract<RunnerEvent, { type: "error" }>["code"]): RunnerEvent => ({
-    type: "error", at: at(), code, message: `runner said ${code}`,
-  }),
+  error: (message = "runner said agent_error"): RunnerEvent => ({ type: "error", at: at(), code: "agent_error", message }),
 };
 
 const evidence: Evidence = {
@@ -47,13 +51,10 @@ const clarification: InvestigationResult = {
   why_needed: "Retry logic changed in v2.",
 };
 
-type Script = { events?: RunnerEvent[]; exitCode?: number; throws?: Error; streamLost?: boolean; aborted?: boolean; stderrTail?: string };
+const success = (result: InvestigationResult = answer): Script => ({ events: [events.started(), events.result(result)] });
 
-const success = (result: InvestigationResult = answer): Script => ({
-  events: [events.started(), events.result(result)],
-});
-
-const TRANSCRIPT = [{ text: "Does render deploy retry?", author: "U1" }];
+const QUESTION = { transcript: [{ text: "Does render deploy retry?", author: "U1" }] };
+const CALLBACK = { url: "https://example.com/hook", secret: "a".repeat(32) };
 
 function harness(env: Record<string, string> = {}) {
   const sandboxes = new FakeSandboxes();
@@ -61,342 +62,253 @@ function harness(env: Record<string, string> = {}) {
   const config = loadConfig(env);
   const log = createLog({}, (line: string) => void logs.push(JSON.parse(line)));
   const deliveries: DeliverInput[] = [];
-
-  function invDeps(): InvestigateDeps {
-    return {
-      config,
-      log,
-      configureSandboxes: async () => sandboxes.open,
-    };
-  }
-
-  const deps: AnswerQuestionDeps = {
+  const h = {
+    sandboxes,
+    logs,
+    deliveries,
     config,
-    log,
-    runInvestigate: (input) => investigateTask(invDeps(), input),
-    runDeliver: async (input) => { deliveries.push(input); },
+    configureSandboxes: async (_allowedDomain: string): Promise<OpenSandbox> => sandboxes.open,
+    investigate: (input: InvestigateInput) =>
+      investigateTask({ config, log, configureSandboxes: (domain) => h.configureSandboxes(domain) }, input),
+    deliver: async (input: DeliverInput) => void deliveries.push(input),
+    ask: (input: unknown, traceId = "trace-1") =>
+      answerQuestion({ config, log, runInvestigate: (i) => h.investigate(i), runDeliver: (d) => h.deliver(d) }, traceId, input),
   };
-  return { sandboxes, logs, deps, config, log, invDeps, deliveries };
+  return h;
 }
+type Harness = ReturnType<typeof harness>;
 
 describe("answerQuestion", () => {
-  it("happy path: returns an answer reply", async () => {
+  it("returns an answer, delivers it to the callback with the caller's metadata, and closes the sandbox", async () => {
     const h = harness();
     h.sandboxes.script(success());
+    const metadata = { channel: "C1", thread_ts: "1.0" };
 
-    const result = await answerQuestion(h.deps, "trace-1", {
-      transcript: TRANSCRIPT,
+    const result = await h.ask({ ...QUESTION, callback: CALLBACK, metadata }, "trace-1");
+
+    expect(result).toMatchObject({
+      trace_id: "trace-1",
+      outcome: "answer",
+      reply: {
+        kind: "answer",
+        traceId: "trace-1",
+        model: "claude-sonnet-4-5",
+        manifestCreatedAt: TEST_MANIFEST.created_at,
+        result: { status: "final_answer", answer: answer.answer },
+      },
     });
-
-    expect(result.outcome).toBe("answer");
-    expect(result.reply.kind).toBe("answer");
-    expect(result.reply.traceId).toBe("trace-1");
+    expect(h.deliveries).toHaveLength(1);
+    expect(h.deliveries[0]!.callback).toEqual(CALLBACK);
+    expect(JSON.parse(h.deliveries[0]!.body)).toEqual({ trace_id: "trace-1", reply: result.reply, metadata });
     expect(h.sandboxes.closed).toEqual(["sbx-1"]);
   });
 
-  it("returns a clarification reply", async () => {
+  it("returns a clarification when the agent needs one", async () => {
     const h = harness();
     h.sandboxes.script(success(clarification));
-
-    const result = await answerQuestion(h.deps, "trace-2", {
-      transcript: TRANSCRIPT,
-    });
-
-    expect(result.outcome).toBe("clarification");
-    expect(result.reply.kind).toBe("clarification");
+    const result = await h.ask(QUESTION, "trace-2");
+    expect(result).toMatchObject({ outcome: "clarification", reply: { kind: "clarification", traceId: "trace-2", result: clarification } });
   });
 
-  it("returns failure reply when investigate fails", async () => {
-    const h = harness();
-    h.sandboxes.script({ events: [events.started(), events.error("agent_error")] });
-
-    const result = await answerQuestion(h.deps, "trace-3", {
-      transcript: TRANSCRIPT,
-    });
-
-    expect(result.outcome).toBe("failure");
-    expect(result.reply.kind).toBe("failure");
+  it.each<{ name: string; env?: Record<string, string>; arrange: (h: Harness) => void; reason: string }>([
+    {
+      name: "the agent stops without an answer",
+      arrange: (h) => h.sandboxes.script({ events: [events.started(), events.error()] }),
+      reason: "the agent stopped without submitting an answer",
+    },
+    {
+      name: "the runner hits the agent timeout",
+      arrange: (h) => h.sandboxes.script({ events: [events.started()], exitCode: 124 }),
+      reason: "the investigation hit the 15-minute limit",
+    },
+    {
+      name: "no snapshot exists",
+      arrange: (h) => void (h.sandboxes.noSnapshot = true),
+      reason: "no repository snapshot is available",
+    },
+    {
+      name: "the snapshot isn't ready",
+      arrange: (h) => void (h.sandboxes.noSnapshot = "notReady"),
+      reason: "the repository snapshot isn't ready",
+    },
+    {
+      name: "the model is unknown",
+      env: { MODEL_PROVIDER: "fake-provider", MODEL: "fake-model" },
+      arrange: () => {},
+      reason: "misconfigured",
+    },
+    {
+      name: "the sandbox config is invalid",
+      arrange: (h) => {
+        h.configureSandboxes = async () => {
+          throw new Error("RENDER_API_KEY is required");
+        };
+      },
+      reason: "misconfigured",
+    },
+  ])("replies with a user-safe failure when $name", async ({ env, arrange, reason }) => {
+    const h = harness(env);
+    arrange(h);
+    const { outcome, reply } = await h.ask(QUESTION);
+    expect(outcome).toBe("failure");
+    expect(reply).toMatchObject({ kind: "failure", reason: expect.stringContaining(reason) });
+    expect(JSON.stringify(reply)).not.toMatch(/runner said|RENDER_API_KEY/);
   });
 
-  it("catches a thrown subtask (retries exhausted) and returns a failure reply", async () => {
+  it("throws on infrastructure failures so the workflow retries, and replies with a failure once retries run out", async () => {
     const h = harness();
-    const deps: AnswerQuestionDeps = {
-      ...h.deps,
-      runInvestigate: async () => { throw new Error("subtask retries exhausted"); },
-    };
+    h.sandboxes.script({ events: [events.started()], streamLost: true });
+    const attempt = h.investigate;
+    let thrown: unknown;
+    h.investigate = (input) => attempt(input).catch((err: unknown) => { thrown = err; throw err; });
 
-    const result = await answerQuestion(deps, "trace-thrown", {
-      transcript: TRANSCRIPT,
-    });
+    const { reply } = await h.ask(QUESTION);
 
-    expect(result.outcome).toBe("failure");
-    expect(result.reply.kind).toBe("failure");
-    if (result.reply.kind === "failure") {
-      expect(result.reply.reason).toContain("investigation kept failing");
-    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(reply).toMatchObject({ kind: "failure", reason: expect.stringContaining("kept failing on infrastructure errors") });
+    expect(h.sandboxes.closed).toEqual(["sbx-1"]);
   });
 
-  it("runs deliver when callback is present", async () => {
+  it("delivers a failure reply to the callback when the question is invalid", async () => {
     const h = harness();
-    h.sandboxes.script(success());
+    const { reply } = await h.ask({ transcript: [{ text: "x".repeat(8001) }], callback: CALLBACK, metadata: { channel: "C1" } });
 
-    const result = await answerQuestion(h.deps, "trace-cb", {
-      transcript: TRANSCRIPT,
-      callback: { url: "https://example.com/hook", secret: "a".repeat(32) },
-      metadata: { channel: "C1", thread_ts: "1.0" },
-    });
-
-    expect(result.outcome).toBe("answer");
-    expect(h.deliveries).toHaveLength(1);
-    const delivery = h.deliveries[0]!;
-    expect(delivery.callback.url).toBe("https://example.com/hook");
-    const parsed = JSON.parse(delivery.body);
-    expect(parsed.reply.kind).toBe("answer");
-    expect(parsed.metadata).toEqual({ channel: "C1", thread_ts: "1.0" });
-  });
-
-  it("does not run deliver when no callback", async () => {
-    const h = harness();
-    h.sandboxes.script(success());
-
-    await answerQuestion(h.deps, "trace-nocb", { transcript: TRANSCRIPT });
-    expect(h.deliveries).toHaveLength(0);
-  });
-
-  it("deliver failure does not fail the task", async () => {
-    const h = harness();
-    h.sandboxes.script(success());
-    const deps: AnswerQuestionDeps = {
-      ...h.deps,
-      runDeliver: async () => { throw new Error("deliver exploded"); },
-    };
-
-    const result = await answerQuestion(deps, "trace-df", {
-      transcript: TRANSCRIPT,
-      callback: { url: "https://example.com/hook", secret: "b".repeat(32) },
-    });
-
-    expect(result.outcome).toBe("answer");
-    expect(h.logs.some((l) => l.event === "deliver_failed")).toBe(true);
-  });
-
-  it("delivers a failure reply for a transcript over the limits instead of throwing", async () => {
-    const h = harness();
-    const result = await answerQuestion(h.deps, "trace-long", {
-      transcript: [{ text: "x".repeat(8001) }],
-      callback: { url: "https://example.com/hook", secret: "c".repeat(32) },
-      metadata: { channel: "C1" },
-    });
-
-    expect(result.reply).toMatchObject({ kind: "failure", reason: expect.stringContaining("couldn't be read") });
+    expect(reply).toMatchObject({ kind: "failure", reason: expect.stringContaining("couldn't be read") });
     expect(h.sandboxes.runs).toHaveLength(0);
     expect(h.deliveries).toHaveLength(1);
     expect(JSON.parse(h.deliveries[0]!.body)).toMatchObject({ reply: { kind: "failure" }, metadata: { channel: "C1" } });
-    expect(h.logs.some((l) => l.event === "invalid_question")).toBe(true);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "invalid_question" }));
   });
 
-  it("returns a failure reply for invalid input without a callback", async () => {
+  it("still returns the reply when delivery fails", async () => {
     const h = harness();
-    const result = await answerQuestion(h.deps, "trace-bad", { transcript: [] });
-    expect(result.reply.kind).toBe("failure");
-    expect(h.deliveries).toHaveLength(0);
+    h.sandboxes.script(success());
+    h.deliver = async () => {
+      throw new Error("deliver exploded");
+    };
+    const result = await h.ask({ ...QUESTION, callback: CALLBACK });
+    expect(result.outcome).toBe("answer");
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "error", event: "deliver_failed" }));
+  });
+
+  it("logs one turn_finished line with the documented fields", async () => {
+    const h = harness();
+    const usage = { input_tokens: 100, output_tokens: 20, cache_read_tokens: 5, cache_write_tokens: 0, cost_usd: 0.01 };
+    h.sandboxes.script({ events: [events.started(), { type: "usage", at: at(), usage }, events.result(answer)] });
+
+    await h.ask(QUESTION, "trace-log");
+
+    expect(h.logs.filter((l) => l.event === "turn_finished")).toEqual([
+      expect.objectContaining({
+        level: "info",
+        trace_id: "trace-log",
+        outcome: "answer",
+        model: "claude-sonnet-4-5",
+        prompt_version: "v1",
+        repos: TEST_MANIFEST.repos.map(({ repository, commit }) => ({ repository, commit })),
+        usage,
+        cost_usd: 0.01,
+        duration_ms: expect.any(Number),
+      }),
+    ]);
+  });
+});
+
+describe("investigateTask", () => {
+  it("opens the configured snapshot within SANDBOX_PROVISION_TIMEOUT_MS, with egress only to the model's API host", async () => {
+    const h = harness({ SANDBOX_PROVISION_TIMEOUT_MS: "120000" });
+    h.sandboxes.script(success());
+    const domains: string[] = [];
+    const opened: unknown[] = [];
+    h.configureSandboxes = async (domain) => {
+      domains.push(domain);
+      return (name, opts) => {
+        opened.push({ name, opts });
+        return h.sandboxes.open(name, opts);
+      };
+    };
+
+    await h.investigate({ transcript: [], trace_id: "t-open" });
+
+    expect(domains).toEqual(["api.anthropic.com"]);
+    expect(opened).toEqual([{ name: h.config.snapshotName, opts: { timeoutMs: 120_000 } }]);
+  });
+
+  it("keeps only evidence from the manifest, pinned to its full commit with a URL built by trusted code", async () => {
+    const h = harness();
+    h.sandboxes.script(success({
+      ...answer,
+      evidence: [
+        { ...evidence, repository: "Render-OSS/CLI", commit: "c".repeat(7), url: "https://evil.example.com/x" },
+        { ...evidence, repository: "evil/repo" },
+        { ...evidence, repository: "render-oss/sdk", commit: "e".repeat(40) },
+      ],
+    }));
+
+    const res = await h.investigate({ transcript: [], trace_id: "t-ev" });
+
+    expect(res.kind === "result" && res.result.status === "final_answer" && res.result.evidence).toEqual([
+      { ...evidence, url: `https://github.com/render-oss/cli/blob/${"c".repeat(40)}/cmd/deploy.go#L10-L24` },
+    ]);
+  });
+
+  it("hands the runner the provider's key and logs investigation_failed with the runner's message, key redacted", async () => {
+    const h = harness({ ANTHROPIC_API_KEY: MODEL_KEY });
+    h.sandboxes.script({ events: [events.started(), events.error(`provider rejected ${MODEL_KEY}`)] });
+
+    const res = await h.investigate({ transcript: [], trace_id: "t-fail" });
+
+    expect(res).toEqual({ kind: "failed", code: "agent_error" });
+    expect(h.sandboxes.runs[0]!.opts.modelApiKey).toBe(MODEL_KEY);
+    expect(h.logs).toContainEqual(expect.objectContaining({
+      level: "warn", event: "investigation_failed", code: "agent_error", message: "provider rejected [redacted]",
+    }));
+    expect(JSON.stringify(h.logs)).not.toContain(MODEL_KEY);
   });
 });
 
 describe("deliverCallback", () => {
-  it("signs correctly and throws on non-2xx", async () => {
-    const received: { headers: Record<string, string>; body: string }[] = [];
+  it("posts a verifiable signed body and rejects a non-2xx response so the deliver task retries", async () => {
+    const secret = "test-secret-1234567890";
+    const received: { headers: Record<string, string | string[] | undefined>; body: string }[] = [];
     const server = createServer((req, res) => {
-      const headers: Record<string, string> = {};
-      for (const [k, v] of Object.entries(req.headers)) {
-        if (typeof v === "string") headers[k] = v;
-      }
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
       req.on("end", () => {
-        received.push({ headers, body: Buffer.concat(chunks).toString() });
-        res.writeHead(200);
+        received.push({ headers: req.headers, body: Buffer.concat(chunks).toString() });
+        res.writeHead(req.url === "/fail" ? 500 : 200);
         res.end();
       });
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
-    const addr = server.address() as { port: number };
+    const base = `http://localhost:${(server.address() as { port: number }).port}`;
+    const body = JSON.stringify({ trace_id: "t1", reply: { kind: "failure", traceId: "t1", reason: "test" } });
     try {
-      await deliverCallback({
-        callback: { url: `http://localhost:${addr.port}/hook`, secret: "test-secret-1234567890" },
-        body: JSON.stringify({ id: "r1", reply: { kind: "failure", traceId: "t1", reason: "test" } }),
-      });
-
-      expect(received).toHaveLength(1);
-      expect(received[0]!.headers["x-researcher-timestamp"]).toMatch(/^\d+$/);
-      expect(received[0]!.headers["x-researcher-signature"]).toMatch(/^v1=[0-9a-f]{64}$/);
-      expect(received[0]!.headers["content-type"]).toBe("application/json");
+      await deliverCallback({ callback: { url: `${base}/hook`, secret }, body });
+      await expect(deliverCallback({ callback: { url: `${base}/fail`, secret }, body })).rejects.toThrow("500");
     } finally {
       server.close();
     }
-  });
 
-  it("throws on non-2xx response", async () => {
-    const server = createServer((_req, res) => {
-      res.writeHead(500);
-      res.end("fail");
-    });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
-    const addr = server.address() as { port: number };
-    try {
-      await expect(
-        deliverCallback({
-          callback: { url: `http://localhost:${addr.port}/hook`, secret: "test-secret-1234567890" },
-          body: "{}",
-        }),
-      ).rejects.toThrow("deliver got 500");
-    } finally {
-      server.close();
-    }
+    const { headers, body: sent } = received[0]!;
+    expect(sent).toBe(body);
+    expect(headers["content-type"]).toBe("application/json");
+    expect(verifyCallback({
+      secret,
+      body: sent,
+      signature: headers["x-researcher-signature"] as string,
+      timestamp: headers["x-researcher-timestamp"] as string,
+    })).toBe(true);
   });
 });
 
-describe("investigate", () => {
-  it("returns failed for agent errors without throwing", async () => {
-    const h = harness();
-    h.sandboxes.script({ events: [events.started(), events.error("agent_error")] });
-
-    const result = await investigateTask(h.invDeps(), { transcript: [], trace_id: "t1" });
-    expect(result.kind).toBe("failed");
-    expect(h.sandboxes.closed).toEqual(["sbx-1"]);
-    expect(h.logs).toContainEqual(expect.objectContaining({
-      level: "warn", event: "investigation_failed", code: "agent_error", message: "runner said agent_error",
-    }));
-  });
-
-  it("returns failed for missing snapshot without throwing", async () => {
-    const h = harness();
-    h.sandboxes.noSnapshot = true;
-
-    const result = await investigateTask(h.invDeps(), { transcript: [], trace_id: "t2" });
-    expect(result).toEqual({ kind: "failed", code: "no_snapshot" });
-
-    const { reply } = await answerQuestion(h.deps, "t2", { transcript: TRANSCRIPT });
-    expect(reply.kind === "failure" && reply.reason).toContain("no repository snapshot is available");
-  });
-
-  it("says the snapshot isn't ready when one exists but isn't available", async () => {
-    const h = harness();
-    h.sandboxes.noSnapshot = "notReady";
-    const result = await investigateTask(h.invDeps(), { transcript: [], trace_id: "t3" });
-    expect(result).toEqual({ kind: "failed", code: "snapshot_not_ready" });
-  });
-
-  it("throws for infra errors so the subtask retries", async () => {
-    const h = harness();
-    h.sandboxes.script({ throws: new Error("sandbox exec reset") });
-
-    await expect(
-      investigateTask(h.invDeps(), { transcript: [], trace_id: "t3" }),
-    ).rejects.toThrow("sandbox exec reset");
-    expect(h.sandboxes.closed).toEqual(["sbx-1"]);
-  });
-
-  it("opens the configured snapshot within SANDBOX_PROVISION_TIMEOUT_MS", async () => {
-    const h = harness({ SANDBOX_PROVISION_TIMEOUT_MS: "120000" });
-    h.sandboxes.script(success());
-    const opened: unknown[] = [];
-    const deps: InvestigateDeps = {
-      ...h.invDeps(),
-      configureSandboxes: async () => (name, opts) => {
-        opened.push({ name, opts });
-        return h.sandboxes.open(name, opts);
-      },
-    };
-
-    await investigateTask(deps, { transcript: [], trace_id: "t-open" });
-    expect(opened).toEqual([{ name: h.config.snapshotName, opts: { timeoutMs: 120_000 } }]);
-  });
-
-  it("always terminates the sandbox", async () => {
-    const h = harness();
-    h.sandboxes.script(success());
-
-    await investigateTask(h.invDeps(), { transcript: [], trace_id: "t4" });
-    expect(h.sandboxes.closed).toEqual(["sbx-1"]);
-  });
-
-  it("returns failed with misconfigured for unknown model", async () => {
-    const h = harness({ MODEL_PROVIDER: "fake-provider", MODEL: "fake-model" });
-
-    const result = await investigateTask(h.invDeps(), { transcript: [], trace_id: "t5" });
-    expect(result).toMatchObject({ kind: "failed", code: "misconfigured" });
-  });
-
-  it("returns failed with misconfigured when sandbox setup throws", async () => {
-    const h = harness();
-    const deps: InvestigateDeps = {
-      ...h.invDeps(),
-      configureSandboxes: async () => { throw new Error("RENDER_API_KEY is required"); },
-    };
-
-    const result = await investigateTask(deps, { transcript: [], trace_id: "t6" });
-    expect(result).toMatchObject({ kind: "failed", code: "misconfigured" });
-    expect(h.logs.some((l) => l.event === "workflow_misconfigured")).toBe(true);
-  });
-});
-
-const base = {};
-
-describe("loadConfig", () => {
-  it("uses defaults", () => {
-    const c = loadConfig(base);
-    expect(c.modelProvider).toBe("anthropic");
-    expect(c.model).toBe("claude-opus-5");
-    expect(c.thinkingLevel).toBe("medium");
-    expect(c.agentTimeoutMs).toBe(15 * 60_000);
-    expect(c.sandboxProvisionTimeoutMs).toBe(5 * 60_000);
-  });
-
-  it("PI_MODEL falls back for MODEL", () => {
-    const c = loadConfig({ ...base, PI_MODEL: "claude-sonnet-4-5" });
-    expect(c.model).toBe("claude-sonnet-4-5");
-  });
-
-  it("MODEL wins over PI_MODEL", () => {
-    const c = loadConfig({ ...base, MODEL: "claude-haiku-4-5", PI_MODEL: "claude-sonnet-4-5" });
-    expect(c.model).toBe("claude-haiku-4-5");
-  });
-
-  it("MODEL_API_KEY wins over provider key var", () => {
-    const c = loadConfig({ ...base, MODEL_API_KEY: "explicit-key", ANTHROPIC_API_KEY: "provider-key" });
-    expect(c.modelApiKey).toBe("explicit-key");
-  });
-
-  it("reads the selected provider's own key var", () => {
-    const c = loadConfig({ ...base, MODEL_PROVIDER: "groq", GROQ_API_KEY: "groq-key" });
-    expect(c.modelApiKey).toBe("groq-key");
-  });
-
-  it("does not use another provider's key var", () => {
-    const c = loadConfig({ ...base, MODEL_PROVIDER: "groq", ANTHROPIC_API_KEY: "ant-key" });
-    expect(c.modelApiKey).toBeUndefined();
-  });
-
-  it("blank values count as unset", () => {
-    const c = loadConfig({ ...base, MODEL_API_KEY: "", ANTHROPIC_API_KEY: "real" });
-    expect(c.modelApiKey).toBe("real");
-  });
-
-});
-
-describe("defineConfig", () => {
-  const raw = { name: "Bot", repos: [{ repository: "acme/api" }], labels: { owner: "o", escalation: "e", supportTeam: "s" } };
-
-  it("defaults the snapshot name and keeps the configured repos", () => {
-    const c = defineConfig(raw, {});
-    expect(c.snapshotName).toBe("codebase-researcher-corpus");
-    expect(c.repos).toEqual([{ repository: "acme/api" }]);
-  });
-
-  it("applies SNAPSHOT_NAME and REPOS overrides", () => {
-    const c = defineConfig(raw, { SNAPSHOT_NAME: "custom-snap", REPOS: "acme/cli, acme/sdk" });
-    expect(c.snapshotName).toBe("custom-snap");
-    expect(c.repos.map((r) => r.repository)).toEqual(["acme/cli", "acme/sdk"]);
+describe("task timeouts", () => {
+  it("give answer_question enough time for every investigate and deliver attempt", () => {
+    const env = { AGENT_TIMEOUT_MS: "600000", SANDBOX_PROVISION_TIMEOUT_MS: "120000" };
+    const investigate = investigateTimeoutSeconds(env);
+    expect(investigate).toBeGreaterThan((600_000 + 120_000) / 1000);
+    expect(parentTimeoutSeconds(env)).toBeGreaterThan(
+      investigate * (INVESTIGATE_MAX_RETRIES + 1) + DELIVER_TIMEOUT_S * (DELIVER_MAX_RETRIES + 1),
+    );
   });
 });
