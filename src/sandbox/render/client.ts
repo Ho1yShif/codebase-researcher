@@ -40,7 +40,7 @@ const READY_RETRY = [404, ...TRANSIENT];
 type ExecOptions = { timeoutMs: number; waitReady?: boolean; signal?: AbortSignal };
 
 /**
- * The SDK's sandbox client (@renderinc/sdk 1.2.0, experimental) plus what it leaves to callers:
+ * The SDK's experimental sandbox client plus what it leaves to callers:
  * - pacing: the Sandbox API allows 100 requests/min per workspace and the SDK neither paces nor retries 429s;
  * - retries on 429/503, which the SDK surfaces as errors;
  * - `waitRunning`: `create` returns while the sandbox is still `creating`, and there is no wait helper;

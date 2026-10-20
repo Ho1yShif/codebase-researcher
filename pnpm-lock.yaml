@@ -18,8 +18,8 @@ importers:
         specifier: ^2.1.0
         version: 2.1.3(hono@4.13.13)
       '@renderinc/sdk':
-        specifier: 1.2.0
-        version: 1.2.0(@opentelemetry/api@1.9.0)
+        specifier: 1.3.0
+        version: 1.3.0(@opentelemetry/api@1.9.0)
       '@slack/types':
         specifier: ^3.1.0
         version: 3.2.0
@@ -446,8 +446,8 @@ packages:
     peerDependencies:
       '@redis/client': ^5.12.1
 
-  '@renderinc/sdk@1.2.0':
-    resolution: {integrity: sha512-1O3+fYWY9ub0tVks882/VF3tY6v2hwFGXX3N/+Y3H8AGjUWLv4F7u08UANgOGLdsuZPdXNWjrLwGeWUq6G8Wug==}
+  '@renderinc/sdk@1.3.0':
+    resolution: {integrity: sha512-665ea4IbCRZ9dKXJtmTZDx+YpBu5tKDS2qvyHfwVB/hqRbZjX38fSUpiXDpmVccjztCH8bOLhVI723kNrUuJFA==}
     engines: {node: '>=18.0.0'}
 
   '@rolldown/binding-android-arm-eabi@1.2.12':
@@ -1567,7 +1567,7 @@ snapshots:
     dependencies:
       '@redis/client': 5.12.1(@opentelemetry/api@1.9.0)
 
-  '@renderinc/sdk@1.2.0(@opentelemetry/api@1.9.0)':
+  '@renderinc/sdk@1.3.0(@opentelemetry/api@1.9.0)':
     dependencies:
       eventsource: 4.1.1
       openapi-fetch: 0.15.2

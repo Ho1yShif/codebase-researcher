@@ -11,7 +11,7 @@ import { git, shq } from "../interface.ts";
 import { bundleRunner } from "../runner-bundle.ts";
 import type { SandboxApi, SandboxClient } from "./client.ts";
 import type { RenderConfig } from "./config.ts";
-import { SANDBOX_APP, SANDBOX_REPOS, SANDBOX_ROOT, SANDBOX_RUN_AS, SANDBOX_SCRATCH, verifySandbox, wirePolicy } from "./sandbox.ts";
+import { SANDBOX_APP, SANDBOX_REPOS, SANDBOX_ROOT, SANDBOX_RUN_AS, SANDBOX_SCRATCH, verifySandbox } from "./sandbox.ts";
 
 export type BuiltSnapshot = { id: string; sandboxGroupId: string };
 
@@ -87,7 +87,7 @@ export const BUILD_SCRIPTS = ["build/git-credential-staged.sh", "build/scrub-cre
  * Builds one named snapshot containing the runner and exactly these repository heads. Each step is a
  * direct Sandbox API call (exec / upload) in an allow-all builder sandbox:
  *
- *   1. Upload sandbox-runtime/ and the runner bundle to a staging dir
+ *   1. Upload sandbox/ and the runner bundle to a staging dir
  *   2. Install tools (git, node, ripgrep) via install-tools.sh
  *   3. Detect node path and privilege-drop tool, create runner user, write env
  *   4. Set permissions, run the runner's self-test
@@ -108,7 +108,7 @@ export async function buildSnapshot(
   const prepare = { timeoutMs: t.prepareTimeoutMs };
   const boot = { timeoutMs: t.bootTimeoutMs };
   const { id } = await client.call(() =>
-    client.api.create({ timeoutSeconds: client.cfg.builderTimeoutSeconds, networkPolicy: wirePolicy({ type: "allow-all" }) }),
+    client.api.create({ timeoutSeconds: client.cfg.builderTimeoutSeconds, networkPolicy: { type: "allow-all" } }),
   );
   try {
     await client.waitRunning(id);
