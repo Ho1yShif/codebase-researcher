@@ -49,8 +49,6 @@ docs/
   1_EXTENSION.md              Corpus, model, agent, API, and channel extension points
   2_ARCHITECTURE.md           Repository map, execution paths, interfaces
   3_TAKEAWAYS.md              Reusable agent and Sandbox patterns
-examples/
-  hello-sandbox.ts            Minimal create, wait, upload, exec, download, terminate example
 src/
   api.ts                      Hono API, question polling, Slack route mounting
   workflow.ts                 Workflow task registration, retries, timeout budgets
@@ -87,7 +85,7 @@ src/
     events.ts                 Redacted JSONL event emitter
     faux.ts                   Deterministic no-model execution
     core-prompt.md            Shared investigation instructions
-sandbox-runtime/
+sandbox/
   install-tools.sh            Prepare Node, Git, ripgrep, and timeout
   as-runner.sh                Drop privileges and clear the environment
   run-investigation.sh        Bound one run and persist events/exit status
@@ -164,8 +162,9 @@ has an outer computed deadline.
 1. Resolves the configured model and derives its API hostname.
 2. Selects the Render or local Sandbox provider.
 3. Opens the newest available snapshot by name.
-4. On Render, waits for the Sandbox to run, verifies the requested network
-   policy, runs `verify.sh` with egress probes, and downloads the manifest.
+4. On Render, waits for the Sandbox to run, verifies the exact requested
+   network policy and HTTPS egress rules, runs `verify.sh` with egress probes,
+   and downloads the manifest.
 5. Builds `RunnerInput` from the transcript, manifest, in-Sandbox paths,
    model, and timeout.
 6. Calls `sandbox.run` and always calls `sandbox.close()` in `finally`.
@@ -177,7 +176,7 @@ reach the next.
 ### 5. Run the agent inside the Sandbox
 
 The workflow uploads `input.json` and a one-time model-key file, then executes
-[`sandbox-runtime/run-investigation.sh`](../sandbox-runtime/run-investigation.sh).
+[`sandbox/run-investigation.sh`](../sandbox/run-investigation.sh).
 That script:
 
 1. Gives the run directory to the unprivileged runner user.

@@ -61,27 +61,24 @@ export async function verifySandbox(
 
 function probeArgs(policy: NetworkPolicy): string {
   if (policy.type === "allow-all") return "";
-  const allowed = policy.type === "allow-list" ? policy.domains.find((d) => !d.startsWith("*.")) : undefined;
+  const allowed = policy.type === "allow-list" ? policy.rules.find((r) => !r.domain.startsWith("*."))?.domain : undefined;
   return ` --deny-probe ${DENY_PROBE_URL}${allowed ? ` --allow-probe ${shq(`https://${allowed}`)}` : ""}`;
 }
 
-type WirePolicy = NonNullable<Parameters<SandboxApi["create"]>[0]>["networkPolicy"];
+type EgressPolicy = {
+  type: string;
+  rules?: Array<{ domain: string; protocol?: string }>;
+};
 
-/**
- * The policy in the shape the API accepts: `type` plus `rules`. SDK 1.2.0's types still describe
- * `default` plus `allowedDomains`, and the API ignores `allowedDomains`, rejecting the allow-list as empty.
- */
-export function wirePolicy(policy: NetworkPolicy): WirePolicy {
-  const wire =
-    policy.type === "allow-list"
-      ? { type: policy.type, rules: policy.domains.map((domain) => ({ domain, protocol: "https" })) }
-      : { type: policy.type };
-  return wire as unknown as WirePolicy;
+function policyRules(policy: EgressPolicy): string[] {
+  return policy.type === "allow-list"
+    ? (policy.rules ?? []).map((r) => `${(r.protocol ?? "https").toLowerCase()}://${r.domain.toLowerCase()}`).sort()
+    : [];
 }
 
-/** Responses carry `type`; `default` is its deprecated alias and may be absent. */
-function policyType(policy: WirePolicy | undefined): string | undefined {
-  return policy && ((policy as { type?: string }).type ?? policy.default);
+function policiesMatch(actual: EgressPolicy, requested: EgressPolicy): boolean {
+  return actual.type === requested.type
+    && JSON.stringify(policyRules(actual)) === JSON.stringify(policyRules(requested));
 }
 
 /**
@@ -91,17 +88,17 @@ function policyType(policy: WirePolicy | undefined): string | undefined {
  */
 export async function openRenderSandbox(client: SandboxClient, snapshotName: string, { timeoutMs }: OpenSandboxOptions): Promise<Sandbox> {
   const policy = client.cfg.networkPolicy;
-  if (policy.type === "allow-list" && !policy.domains.length) {
-    throw new Error("cannot create an investigation sandbox with allow-list policy and no domains");
+  if (policy.type === "allow-list" && !policy.rules.length) {
+    throw new Error("cannot create an investigation sandbox with allow-list policy and no egress rules");
   }
-  // SDK 1.2.0's create and get take no signal: one of those requests in flight can finish past the deadline.
+  // SDK create and get take no signal: one of those requests in flight can finish past the deadline.
   const signal = AbortSignal.timeout(timeoutMs);
   const timedOut = (cause: unknown) =>
     new Error(`could not open a sandbox from ${JSON.stringify(snapshotName)} within ${timeoutMs}ms (SANDBOX_PROVISION_TIMEOUT_MS)`, { cause });
   let created: Awaited<ReturnType<SandboxApi["create"]>>;
   try {
     created = await client.call(
-      () => client.api.create({ snapshotName, networkPolicy: wirePolicy(policy), timeoutSeconds: client.cfg.investigationTimeoutSeconds }),
+      () => client.api.create({ snapshotName, networkPolicy: policy, timeoutSeconds: client.cfg.investigationTimeoutSeconds }),
       { signal },
     );
   } catch (err) {
@@ -114,8 +111,7 @@ export async function openRenderSandbox(client: SandboxClient, snapshotName: str
     if (signal.aborted) throw timedOut(err);
     if (policy.type === "allow-list" && err instanceof ClientError && [400, 422].includes(err.statusCode)) {
       throw new Error(
-        `Render rejected networkPolicy allow-list [${policy.domains.join(", ")}]: ${err.message}. ` +
-          "This workspace may not support allow-list egress; set SANDBOX_NETWORK_POLICY=allow-all (or deny-all) to proceed.",
+        `Render rejected HTTPS egress allow-list [${policyRules(policy).join(", ")}]: ${err.message}`,
         { cause: err },
       );
     }
@@ -123,9 +119,11 @@ export async function openRenderSandbox(client: SandboxClient, snapshotName: str
   }
   const { id } = created;
   try {
-    const createdType = policyType(created.networkPolicy);
-    if (created.networkPolicy && createdType !== policy.type) {
-      throw new Error(`Render created ${id} with networkPolicy ${createdType}, not ${policy.type}; refusing to widen egress`);
+    if (!policiesMatch(created.networkPolicy, policy)) {
+      throw new Error(
+        `Render created ${id} with networkPolicy ${created.networkPolicy.type} [${policyRules(created.networkPolicy).join(", ")}], ` +
+          `not ${policy.type} [${policyRules(policy).join(", ")}]; refusing unexpected egress`,
+      );
     }
     await client.waitRunning(id, { timeoutMs, signal });
     const info = await verifySandbox(client, id, { probes: policy, waitReady: true, timeoutMs, signal });

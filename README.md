@@ -52,7 +52,7 @@ A reader can follow each link to the exact lines and decide for themselves.
 
 ### What it demonstrates on Render
 
-- **Sandboxes:** one fresh, isolated Sandbox per question, restored from a snapshot that a privileged builder Sandbox prepared once. The investigation Sandbox has no git credentials and can reach only the model provider's API.
+- **Sandboxes:** one fresh, isolated Sandbox per question, restored from a snapshot that a privileged builder Sandbox prepared once. The investigation Sandbox has no git credentials and, by default, can reach only the model provider's API.
 - **Workflows:** each question is a durable workflow run with subtasks, per-attempt timeouts, and retries for infrastructure failures. The run is the record of the question and its answer.
 - **Cron Jobs:** an hourly job rebuilds the repository snapshot, so investigations see recent commits and the snapshot never expires.
 - **Blueprints:** one `render.yaml` creates the project, its three services, and their wiring, and prompts for each secret.
@@ -71,7 +71,7 @@ A reader can follow each link to the exact lines and decide for themselves.
 - Every question gets its own Sandbox, restored from an immutable snapshot. No state carries between questions.
 - Repositories are root-owned and read-only inside the Sandbox, and the runner runs as an unprivileged user.
 - The model API key arrives as a one-time file that the runner deletes on read. The runner's Node binary is execute-only, so the agent's commands can't read the key from its memory. The snapshot build and every restored Sandbox must prove this, or the build fails and the Sandbox gets no work.
-- HTTP(S) egress is limited to the model provider's API host, derived from the configured model. DNS still resolves arbitrary names.
+- HTTPS egress defaults to the model provider's API host and can be replaced with an exact host and leftmost-wildcard allow-list. DNS still resolves arbitrary names.
 - Git tokens exist only in the builder Sandbox while it clones. They are scrubbed and verified absent before the snapshot is taken.
 - Anyone who can ask the bot can read the configured repositories through it, so limit who can ask.
 
@@ -100,7 +100,6 @@ To try it on your machine first, without a Sandbox or a model key, clone a coupl
 - [docs/1_EXTENSION.md](docs/1_EXTENSION.md): configure the corpus, model, and agent, or add an API client or channel.
 - [docs/2_ARCHITECTURE.md](docs/2_ARCHITECTURE.md): repository layout, core execution paths, interfaces, and trust boundaries.
 - [docs/3_TAKEAWAYS.md](docs/3_TAKEAWAYS.md): reusable patterns for agents, scheduled snapshots, security, and guardrails.
-- [`examples/hello-sandbox.ts`](examples/hello-sandbox.ts): a short round trip through the Sandbox API (create, wait, upload, exec, download, terminate). Start here if you are learning Render Sandboxes, then trace the complete [snapshot and investigation paths](docs/2_ARCHITECTURE.md#core-execution-paths).
 
 ## License
 

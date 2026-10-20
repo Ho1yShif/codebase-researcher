@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { configureSandboxes } from "../src/sandbox/index.ts";
 import { SnapshotUnavailableError } from "../src/sandbox/interface.ts";
 import { SandboxClient, type SandboxApi } from "../src/sandbox/render/client.ts";
-import type { NetworkPolicy, RenderConfig } from "../src/sandbox/render/config.ts";
+import { loadRenderConfig, type NetworkPolicy, type RenderConfig } from "../src/sandbox/render/config.ts";
 import { openRenderSandbox, runInvestigation } from "../src/sandbox/render/sandbox.ts";
 import { buildSnapshot, pruneSnapshots } from "../src/sandbox/render/snapshot.ts";
 import { runnerInput } from "./helpers.ts";
@@ -81,7 +81,7 @@ class FakeApi {
         };
       },
       async get(id) {
-        return { id, status: self.status, plan: "starter", networkPolicy: { default: "allow-all" }, region: "oregon", timeoutSeconds: 1, createdAt: "" };
+        return { id, status: self.status, plan: "starter", networkPolicy: { type: "allow-all" }, region: "oregon", timeoutSeconds: 1, createdAt: "" };
       },
       async exec(id, command, _ownerId, signal) {
         self.calls.push({ op: "exec", id, command });
@@ -156,10 +156,16 @@ function snapshot(id: string, status: "creating" | "available" | "failed", name?
 let fake: FakeApi;
 let logs: Record<string, unknown>[];
 const silent = createLog({}, () => {});
-const SANDBOX_DIR = fileURLToPath(new URL("../sandbox-runtime/", import.meta.url));
+const SANDBOX_DIR = fileURLToPath(new URL("../sandbox/", import.meta.url));
 const OPEN = { timeoutMs: 60_000 };
 
-function client(policy: NetworkPolicy = { type: "allow-list", domains: ["api.anthropic.com"] }, api = fake.api()) {
+function client(
+  policy: NetworkPolicy = {
+    type: "allow-list",
+    rules: [{ domain: "api.anthropic.com", protocol: "https" }],
+  },
+  api = fake.api(),
+) {
   const cfg: RenderConfig = {
     apiKey: "rnd_test",
     workspaceId: "tea-test",
@@ -298,7 +304,18 @@ describe("openRenderSandbox", () => {
   it("refuses and terminates a sandbox created with wider egress than requested", async () => {
     fake.exec_ = prepareExec;
     fake.createdPolicy = { type: "allow-all" };
-    await expect(openRenderSandbox(client(), NAME, OPEN)).rejects.toThrow("refusing to widen egress");
+    await expect(openRenderSandbox(client(), NAME, OPEN)).rejects.toThrow("refusing unexpected egress");
+    expect(fake.terminated()).toEqual(["sbx-1"]);
+    expect(fake.commands()).toEqual([]);
+  });
+
+  it("refuses and terminates a sandbox created with different allow-list rules", async () => {
+    fake.exec_ = prepareExec;
+    fake.createdPolicy = {
+      type: "allow-list",
+      rules: [{ domain: "*.example.com", protocol: "https" }],
+    };
+    await expect(openRenderSandbox(client(), NAME, OPEN)).rejects.toThrow("refusing unexpected egress");
     expect(fake.terminated()).toEqual(["sbx-1"]);
     expect(fake.commands()).toEqual([]);
   });
@@ -372,6 +389,21 @@ describe("runInvestigation", () => {
 });
 
 describe("configureSandboxes", () => {
+  it("maps comma-separated domains and wildcards to HTTPS egress rules", async () => {
+    const cfg = await loadRenderConfig({
+      RENDER_API_KEY: "rnd_test",
+      RENDER_WORKSPACE_ID: "tea-test",
+      SANDBOX_ALLOWED_DOMAINS: "API.GITHUB.COM, *.pypi.org, api.github.com",
+    });
+    expect(cfg.networkPolicy).toEqual({
+      type: "allow-list",
+      rules: [
+        { domain: "api.github.com", protocol: "https" },
+        { domain: "*.pypi.org", protocol: "https" },
+      ],
+    });
+  });
+
   it("requires Render sandboxes on Render, defaults to local elsewhere, and rejects unknown providers", async () => {
     await expect(configureSandboxes({ RENDER: "true" }, silent)).rejects.toThrow("RENDER_API_KEY");
     await expect(configureSandboxes({}, silent)).resolves.toBeTypeOf("function");

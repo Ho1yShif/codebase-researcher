@@ -39,7 +39,7 @@ artifacts.
 
 Implementation: [`src/sandbox/render/snapshot.ts`](../src/sandbox/render/snapshot.ts),
 [`src/cron.ts`](../src/cron.ts), and
-[`sandbox-runtime/verify.sh`](../sandbox-runtime/verify.sh).
+[`sandbox/verify.sh`](../sandbox/verify.sh).
 
 ## Put the agent in the Sandbox, not beside it
 
@@ -92,9 +92,10 @@ instructions from a repository. Enforce important properties below the model.
 
 - The builder has broad egress but never runs the agent.
 - Investigation Sandboxes allow only the model provider's HTTPS host by
-  default.
-- The workflow refuses a Sandbox whose returned policy is broader than the
-  requested policy.
+  default, with exact and leftmost-wildcard rules available when more hosts
+  are required.
+- The workflow refuses a Sandbox whose returned policy or rules differ from
+  what it requested.
 - Egress probes run before work starts.
 
 ### Verification
@@ -109,9 +110,9 @@ memory protection, and network behavior:
 A failed verification produces no snapshot or no investigation. This makes
 security properties executable preconditions instead of comments.
 
-Implementation: [`sandbox-runtime/as-runner.sh`](../sandbox-runtime/as-runner.sh),
-[`sandbox-runtime/verify.sh`](../sandbox-runtime/verify.sh),
-[`sandbox-runtime/build/`](../sandbox-runtime/build), and
+Implementation: [`sandbox/as-runner.sh`](../sandbox/as-runner.sh),
+[`sandbox/verify.sh`](../sandbox/verify.sh),
+[`sandbox/build/`](../sandbox/build), and
 [`src/runner/main.ts`](../src/runner/main.ts).
 
 ## Treat guardrails and boundaries differently
@@ -198,7 +199,7 @@ Apply deadlines at several layers:
 Cleanup should be idempotent and live in `finally`. A provider-side timeout is
 still necessary for the gap where the host dies before cleanup.
 
-Implementation: [`sandbox-runtime/run-investigation.sh`](../sandbox-runtime/run-investigation.sh),
+Implementation: [`sandbox/run-investigation.sh`](../sandbox/run-investigation.sh),
 [`src/sandbox/render/sandbox.ts`](../src/sandbox/render/sandbox.ts), and
 [`src/workflow.ts`](../src/workflow.ts).
 

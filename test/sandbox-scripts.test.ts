@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { git, parseRunnerEvents } from "../src/sandbox/interface.ts";
 import { FAKE_RUNNER, makeRepo, runnerInput, runnerReport } from "./helpers.ts";
 
-const SANDBOX = fileURLToPath(new URL("../sandbox-runtime/", import.meta.url));
+const SANDBOX = fileURLToPath(new URL("../sandbox/", import.meta.url));
 
 let tmp: string;
 let env: NodeJS.ProcessEnv;

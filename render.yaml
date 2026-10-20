@@ -47,7 +47,7 @@ projects:
             buildCommand: pnpm install --frozen-lockfile
             startCommand: pnpm start:workflow
             buildFilter:
-              paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version]
+              paths: [src/**, sandbox/**, config.ts, prompt.md, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version]
             envVars:
               - key: RENDER_API_KEY
                 sync: false
@@ -76,7 +76,7 @@ projects:
             buildCommand: pnpm install --frozen-lockfile
             startCommand: pnpm refresh
             buildFilter:
-              paths: [src/**, sandbox-runtime/**, config.ts, prompt.md, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version]
+              paths: [src/**, sandbox/**, config.ts, prompt.md, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version]
             envVars:
               - key: RENDER_API_KEY
                 sync: false

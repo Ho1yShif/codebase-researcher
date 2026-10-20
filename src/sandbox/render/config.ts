@@ -1,13 +1,12 @@
 import { join } from "node:path";
+import type { SandboxNetworkPolicy } from "@renderinc/sdk/experimental";
 import { z } from "zod";
 import config from "../../../config.ts";
 import { DEFAULT_CREDENTIALS, type HostCredentials } from "../../bot-config.ts";
 import { present } from "../../util.ts";
 import { REPO_ROOT } from "../interface.ts";
 
-export type NetworkPolicy =
-  | { type: "allow-all" | "deny-all" }
-  | { type: "allow-list"; domains: string[] };
+export type NetworkPolicy = SandboxNetworkPolicy;
 
 export type RenderConfig = {
   apiKey: string;
@@ -40,7 +39,9 @@ export async function loadRenderConfig(
       RENDER_API_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(1_000),
     })
     .parse(present(env));
-  const explicit = e.SANDBOX_ALLOWED_DOMAINS?.split(",").map((d) => d.trim()).filter(Boolean);
+  const explicit = e.SANDBOX_ALLOWED_DOMAINS
+    ? [...new Set(e.SANDBOX_ALLOWED_DOMAINS.split(",").map((d) => d.trim().toLowerCase()).filter(Boolean))]
+    : undefined;
   const domains = explicit?.length ? explicit : derivedAllowedDomain ? [derivedAllowedDomain] : [];
   if (e.SANDBOX_NETWORK_POLICY === "allow-list" && !domains.length && e.SANDBOX_ALLOWED_DOMAINS !== undefined) {
     throw new Error("SANDBOX_ALLOWED_DOMAINS must list at least one domain when SANDBOX_NETWORK_POLICY=allow-list");
@@ -54,12 +55,12 @@ export async function loadRenderConfig(
     hostCredentials: collectHostCredentials(config.gitCredentials, env),
     networkPolicy:
       e.SANDBOX_NETWORK_POLICY === "allow-list"
-        ? { type: "allow-list", domains }
+        ? { type: "allow-list", rules: domains.map((domain) => ({ domain, protocol: "https" })) }
         : { type: e.SANDBOX_NETWORK_POLICY },
     investigationTimeoutSeconds: e.SANDBOX_TIMEOUT_SECONDS,
     builderTimeoutSeconds: e.SANDBOX_BUILDER_TIMEOUT_SECONDS,
     minRequestIntervalMs: e.RENDER_API_MIN_INTERVAL_MS,
-    sandboxDir: join(REPO_ROOT, "sandbox-runtime"),
+    sandboxDir: join(REPO_ROOT, "sandbox"),
   };
 }
 

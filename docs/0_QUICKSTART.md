@@ -248,7 +248,7 @@ in the Dashboard. Alert on consecutive `snapshot_refresh` events with
 ### After a change
 
 - Changes to repositories, `prompt.md`, `src/runner/`, or
-  `sandbox-runtime/` require a successful snapshot refresh.
+  `sandbox/` require a successful snapshot refresh.
 - Changing `snapshotName` requires an immediate refresh; questions fail until
   the new name exists.
 - Label changes require only the API redeploy.

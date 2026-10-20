@@ -45,7 +45,7 @@ export default defineConfig({
 `REPOS=owner/a,owner/b` and `SNAPSHOT_NAME=...` override the corresponding
 values for local development and tests.
 
-Repository, runner, prompt, and `sandbox-runtime/` changes become available
+Repository, runner, prompt, and `sandbox/` changes become available
 only after the snapshot cron builds a new snapshot. All checkouts and runtime
 artifacts must fit within the Sandbox's 10 GB.
 
@@ -173,8 +173,11 @@ workflow service as `sync: false`. `PI_THINKING_LEVEL` accepts `off`,
 `minimal`, `low`, `medium`, or `high`.
 
 The investigation Sandbox's allow-list is derived from the selected model's
-base URL. `SANDBOX_ALLOWED_DOMAINS` overrides it. Use a dedicated,
-spend-capped key; DNS remains a documented residual risk.
+base URL. `SANDBOX_ALLOWED_DOMAINS` overrides it with a comma-separated list
+of HTTPS hosts. Matching is exact; use a leftmost wildcard when subdomains are
+required. Because this replaces the derived default, retain the model host:
+`api.anthropic.com,api.github.com,*.pypi.org`. Use a dedicated, spend-capped
+key; DNS remains a documented residual risk.
 
 ## Extend the question API
 
@@ -351,7 +354,7 @@ string is treated as unset.
 | `AGENT_TIMEOUT_MS` | `900000` | Agent deadline |
 | `SANDBOX_PROVISION_TIMEOUT_MS` | `300000` | Restore, boot, verify, and manifest deadline |
 | `SANDBOX_NETWORK_POLICY` | `allow-list` | `allow-list`, `allow-all`, or `deny-all` |
-| `SANDBOX_ALLOWED_DOMAINS` | Model host | Explicit allowed hosts |
+| `SANDBOX_ALLOWED_DOMAINS` | Model host | Comma-separated HTTPS egress hosts; supports leftmost wildcards |
 | `SANDBOX_TIMEOUT_SECONDS` | `1800` | Provider-side termination backstop |
 | `RENDER_API_MIN_INTERVAL_MS` | `1000` | Per-client API request spacing |
 | `SNAPSHOT_NAME` | `config.ts` | Snapshot-name override |
