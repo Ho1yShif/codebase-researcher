@@ -75,30 +75,32 @@ A reader can follow each link to the exact lines and decide for themselves.
 - Git tokens exist only in the builder Sandbox while it clones. They are scrubbed and verified absent before the snapshot is taken.
 - Anyone who can ask the bot can read the configured repositories through it, so limit who can ask.
 
-The [security boundary](docs/WALKTHROUGH.md#the-security-boundary) section of the walkthrough explains each property and the residual risks.
+The architecture guide's [trust boundaries](docs/2_ARCHITECTURE.md#trust-boundaries)
+section explains these properties and the residual risks.
 
 ## Get running
 
 You need a Render workspace with Sandboxes access in the Oregon region, a
 Render API key, and a model API key (Anthropic by default). The Blueprint uses
 paid plans for the API and snapshot cron; see the
-[prerequisites](docs/QUICKSTART.md#prerequisites) before deploying.
+[prerequisites](docs/0_QUICKSTART.md#prerequisites) before deploying.
 
 1. Fork this repository. Edit `config.ts` to list your repositories and `prompt.md` to describe your product. Commit and push.
 2. In the Render Dashboard, create a Blueprint from your fork and paste the secrets it asks for.
 3. Trigger the `codebase-researcher-snapshots` cron job once to build the first snapshot (about 5 minutes).
-4. Follow [Ask your first question](docs/QUICKSTART.md#ask-your-first-question)
+4. Follow [Ask your first question](docs/0_QUICKSTART.md#ask-your-first-question)
    to send a request and poll its result. An investigation usually takes one
    to two minutes.
 
-To try it on your machine first, without a Sandbox or a model key, clone a couple of repositories into `.scratch/repos/` and run the workflow and the API locally with the runner's `--faux` mode, which follows a fixed script instead of calling a model. [Run it locally](docs/QUICKSTART.md#run-it-locally) has the commands.
+To try it on your machine first, without a Sandbox or a model key, clone a couple of repositories into `.scratch/repos/` and run the workflow and the API locally with the runner's `--faux` mode, which follows a fixed script instead of calling a model. [Run it locally](docs/0_QUICKSTART.md#run-it-locally) has the commands.
 
 ## Learn more
 
-- [docs/QUICKSTART.md](docs/QUICKSTART.md): setup, deploy, Slack, local development, customization, configuration reference, and operations.
-- [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md): the repository layout, the main constructs and interfaces, and how a question moves through them.
-- [docs/TAKEAWAYS.md](docs/TAKEAWAYS.md): reusable patterns and their implementation locations.
-- [`examples/hello-sandbox.ts`](examples/hello-sandbox.ts): a short round trip through the Sandbox API (create, wait, upload, exec, download, terminate). Start here if you are learning Render Sandboxes, then read the walkthrough's [Sandboxes](docs/WALKTHROUGH.md#sandboxes) section to see how this project builds, restores, verifies, and secures them.
+- [docs/0_QUICKSTART.md](docs/0_QUICKSTART.md): deploy, ask a question, connect Slack, develop locally, and operate the service.
+- [docs/1_EXTENSION.md](docs/1_EXTENSION.md): configure the corpus, model, and agent, or add an API client or channel.
+- [docs/2_ARCHITECTURE.md](docs/2_ARCHITECTURE.md): repository layout, core execution paths, interfaces, and trust boundaries.
+- [docs/3_TAKEAWAYS.md](docs/3_TAKEAWAYS.md): reusable patterns for agents, scheduled snapshots, security, and guardrails.
+- [`examples/hello-sandbox.ts`](examples/hello-sandbox.ts): a short round trip through the Sandbox API (create, wait, upload, exec, download, terminate). Start here if you are learning Render Sandboxes, then trace the complete [snapshot and investigation paths](docs/2_ARCHITECTURE.md#core-execution-paths).
 
 ## License
 

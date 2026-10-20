@@ -1,6 +1,6 @@
 /**
  * The smallest useful Render Sandbox round trip: create, wait, upload, exec, download, terminate.
- * The full system is built from these same calls; the Sandboxes section of docs/WALKTHROUGH.md maps each one to where it is used.
+ * The full system is built from these calls; docs/2_ARCHITECTURE.md traces where each is used.
  *
  *   RENDER_API_KEY=... RENDER_WORKSPACE_ID=tea-... pnpm exec tsx examples/hello-sandbox.ts [snapshot-name]
  */
