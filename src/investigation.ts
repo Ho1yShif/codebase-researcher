@@ -1,15 +1,16 @@
 import { z } from "zod";
 
+export const MESSAGE_MAX_CHARS = 8000;
+export const TRANSCRIPT_MAX_MESSAGES = 200;
+
 export const TranscriptMessage = z.object({
-  ts: z.string(),
-  user_id: z.string().nullable(),
-  is_agent: z.boolean(),
-  text: z.string(),
-  at: z.iso.datetime().optional(),
+  role: z.enum(["user", "agent"]),
+  text: z.string().max(MESSAGE_MAX_CHARS),
 });
 export type TranscriptMessage = z.infer<typeof TranscriptMessage>;
 
-export const Transcript = z.array(TranscriptMessage);
+/** The conversation so far, oldest first; the last user message is the question for this turn. */
+export const Transcript = z.array(TranscriptMessage).min(1).max(TRANSCRIPT_MAX_MESSAGES);
 export type Transcript = z.infer<typeof Transcript>;
 
 export const Confidence = z.enum(["high", "medium", "low"]);

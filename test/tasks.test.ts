@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { verifyCallback } from "../src/callback.ts";
 import type { Evidence, InvestigationResult } from "../src/investigation.ts";
 import { createLog } from "../src/log.ts";
+import type { AnswerQuestionInput } from "../src/question.ts";
 import type { RunnerEvent } from "../src/runner/protocol.ts";
 import type { OpenSandbox } from "../src/sandbox/interface.ts";
 import { answerQuestion, deliverCallback, investigateTask, type DeliverInput, type InvestigateInput } from "../src/tasks.ts";
@@ -53,7 +54,7 @@ const clarification: InvestigationResult = {
 
 const success = (result: InvestigationResult = answer): Script => ({ events: [events.started(), events.result(result)] });
 
-const QUESTION = { transcript: [{ text: "Does render deploy retry?", author: "U1" }] };
+const QUESTION: AnswerQuestionInput = { transcript: [{ role: "user", text: "Does render deploy retry?" }] };
 const CALLBACK = { url: "https://example.com/hook", secret: "a".repeat(32) };
 
 function harness(env: Record<string, string> = {}) {
@@ -82,7 +83,7 @@ describe("answerQuestion", () => {
   it("returns an answer, delivers it to the callback with the caller's metadata, and closes the sandbox", async () => {
     const h = harness();
     h.sandboxes.script(success());
-    const metadata = { channel: "C1", thread_ts: "1.0" };
+    const metadata = { ticket: "T-1" };
 
     const result = await h.ask({ ...QUESTION, callback: CALLBACK, metadata }, "trace-1");
 
@@ -171,12 +172,12 @@ describe("answerQuestion", () => {
 
   it("delivers a failure reply to the callback when the question is invalid", async () => {
     const h = harness();
-    const { reply } = await h.ask({ transcript: [{ text: "x".repeat(8001) }], callback: CALLBACK, metadata: { channel: "C1" } });
+    const { reply } = await h.ask({ transcript: [{ role: "user", text: "x".repeat(8001) }], callback: CALLBACK, metadata: { ticket: "T-1" } });
 
     expect(reply).toMatchObject({ kind: "failure", reason: expect.stringContaining("couldn't be read") });
     expect(h.sandboxes.runs).toHaveLength(0);
     expect(h.deliveries).toHaveLength(1);
-    expect(JSON.parse(h.deliveries[0]!.body)).toMatchObject({ reply: { kind: "failure" }, metadata: { channel: "C1" } });
+    expect(JSON.parse(h.deliveries[0]!.body)).toMatchObject({ reply: { kind: "failure" }, metadata: { ticket: "T-1" } });
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "invalid_question" }));
   });
 
@@ -228,7 +229,7 @@ describe("investigateTask", () => {
       };
     };
 
-    await h.investigate({ transcript: [], trace_id: "t-open" });
+    await h.investigate({ transcript: QUESTION.transcript, trace_id: "t-open" });
 
     expect(domains).toEqual(["api.anthropic.com"]);
     expect(opened).toEqual([{ name: h.config.snapshotName, opts: { timeoutMs: 120_000 } }]);
@@ -245,7 +246,7 @@ describe("investigateTask", () => {
       ],
     }));
 
-    const res = await h.investigate({ transcript: [], trace_id: "t-ev" });
+    const res = await h.investigate({ transcript: QUESTION.transcript, trace_id: "t-ev" });
 
     expect(res.kind === "result" && res.result.status === "final_answer" && res.result.evidence).toEqual([
       { ...evidence, url: `https://github.com/render-oss/cli/blob/${"c".repeat(40)}/cmd/deploy.go#L10-L24` },
@@ -256,7 +257,7 @@ describe("investigateTask", () => {
     const h = harness({ ANTHROPIC_API_KEY: MODEL_KEY });
     h.sandboxes.script({ events: [events.started(), events.error(`provider rejected ${MODEL_KEY}`)] });
 
-    const res = await h.investigate({ transcript: [], trace_id: "t-fail" });
+    const res = await h.investigate({ transcript: QUESTION.transcript, trace_id: "t-fail" });
 
     expect(res).toEqual({ kind: "failed", code: "agent_error" });
     expect(h.sandboxes.runs[0]!.opts.modelApiKey).toBe(MODEL_KEY);

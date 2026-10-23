@@ -9,7 +9,7 @@ const TOKEN = "test-api-token-1234";
 const AUTH = { Authorization: `Bearer ${TOKEN}` };
 const JSON_AUTH = { "content-type": "application/json", ...AUTH };
 const qid = (runId: string) => toQuestionId(TOKEN, runId);
-const transcript = [{ text: "How does deploy retry?", author: "U1" }];
+const question = "How does deploy retry?";
 
 function harness(overrides: Partial<AppDeps> = {}) {
   const started: Array<{ input: unknown; key?: string }> = [];
@@ -56,7 +56,7 @@ describe("HTTP API", () => {
       const post = await app.request("/v1/questions", {
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
-        body: JSON.stringify({ transcript }),
+        body: JSON.stringify({ question }),
       });
       expect(post.status).toBe(401);
       expect((await app.request(`/v1/questions/${qid("run-1")}`, { headers })).status).toBe(401);
@@ -66,11 +66,10 @@ describe("HTTP API", () => {
 
   it("starts a question and returns 202 with a signed question id, passing the idempotency key", async () => {
     const { post, started, logs } = harness();
-    const body = { transcript, metadata: { ticket: "T-1" } };
-    const res = await post(body, { "Idempotency-Key": "idem-1" });
+    const res = await post({ question, metadata: { ticket: "T-1" } }, { "Idempotency-Key": "idem-1" });
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ id: qid("run-123") });
-    expect(started).toEqual([{ input: body, key: "idem-1" }]);
+    expect(started).toEqual([{ input: { transcript: [{ role: "user", text: question }], metadata: { ticket: "T-1" } }, key: "idem-1" }]);
     expect(logs).toContainEqual(expect.objectContaining({ event: "task_started", run_id: "run-123" }));
   });
 
@@ -78,12 +77,11 @@ describe("HTTP API", () => {
     const { post, started } = harness();
     const cases: Record<string, unknown> = {
       "malformed JSON": "{not json",
-      "missing transcript": {},
-      "empty transcript": { transcript: [] },
-      "message over 8000 chars": { transcript: [{ text: "x".repeat(8001) }] },
-      "more than 200 messages": { transcript: Array.from({ length: 201 }, () => ({ text: "hi" })) },
-      "more than 16 metadata keys": { transcript, metadata: Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`k${i}`, "v"])) },
-      "callback secret under 16 chars": { transcript, callback: { url: "https://example.com/hook", secret: "short" } },
+      "missing question": {},
+      "blank question": { question: "  " },
+      "question over 8000 chars": { question: "x".repeat(8001) },
+      "more than 16 metadata keys": { question, metadata: Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`k${i}`, "v"])) },
+      "callback secret under 16 chars": { question, callback: { url: "https://example.com/hook", secret: "short" } },
     };
     for (const [name, body] of Object.entries(cases)) {
       expect((await post(body)).status, name).toBe(400);
@@ -91,16 +89,51 @@ describe("HTTP API", () => {
     expect(started).toEqual([]);
   });
 
+  it("continues an earlier question: its transcript, then its reply as the agent's turn, then the new question", async () => {
+    const earlier = [{ role: "user", text: "How does deploy retry?" }];
+    const reply = { kind: "clarification", traceId: "t1", result: { status: "needs_clarification", question: "Which CLI version?", why_needed: "It changed in v2." } };
+    const lookups: string[] = [];
+    const { post, started } = harness({
+      getTaskRun: async (id) => {
+        lookups.push(id);
+        return { status: "completed", input: [{ transcript: earlier }], results: [{ trace_id: "t1", reply }] };
+      },
+    });
+
+    const res = await post({ question: "v2.3", follow_up_to: qid("run-1") });
+
+    expect(res.status).toBe(202);
+    expect(lookups).toEqual(["run-1"]);
+    expect(started[0]!.input).toMatchObject({
+      transcript: [...earlier, { role: "agent", text: "Which CLI version?" }, { role: "user", text: "v2.3" }],
+    });
+  });
+
+  it("refuses a follow-up to an unknown, unfinished, or overlong conversation", async () => {
+    const running = withRun({ status: "running", results: [] });
+    expect((await running.post({ question, follow_up_to: qid("run-1") })).status).toBe(409);
+    expect((await running.post({ question, follow_up_to: "trn-forged.AAAAAAAAAAAAAAAAAAAAAA" })).status).toBe(404);
+
+    const reply = { kind: "failure", traceId: "t1", reason: "it timed out" };
+    const full = Array.from({ length: 199 }, () => ({ role: "user", text: "hi" }));
+    const long = withRun({ status: "completed", input: [{ transcript: full }], results: [{ reply }] });
+    const res = await long.post({ question, follow_up_to: qid("run-1") });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: expect.stringContaining("at most 200 messages") });
+    expect(running.started).toEqual([]);
+    expect(long.started).toEqual([]);
+  });
+
   it("requires an https callback URL, allowing http://localhost only in local dev", async () => {
     const secret = "a".repeat(32);
     const prod = harness();
-    expect((await prod.post({ transcript, callback: { url: "http://example.com/hook", secret } })).status).toBe(400);
-    expect((await prod.post({ transcript, callback: { url: "http://localhost:4000/hook", secret } })).status).toBe(400);
-    expect((await prod.post({ transcript, callback: { url: "https://example.com/hook", secret } })).status).toBe(202);
+    expect((await prod.post({ question, callback: { url: "http://example.com/hook", secret } })).status).toBe(400);
+    expect((await prod.post({ question, callback: { url: "http://localhost:4000/hook", secret } })).status).toBe(400);
+    expect((await prod.post({ question, callback: { url: "https://example.com/hook", secret } })).status).toBe(202);
 
     const local = harness({ isLocalDev: true });
-    expect((await local.post({ transcript, callback: { url: "http://localhost:4000/hook", secret } })).status).toBe(202);
-    expect((await local.post({ transcript, callback: { url: "http://example.com/hook", secret } })).status).toBe(400);
+    expect((await local.post({ question, callback: { url: "http://localhost:4000/hook", secret } })).status).toBe(202);
+    expect((await local.post({ question, callback: { url: "http://example.com/hook", secret } })).status).toBe(400);
   });
 
   it("maps the run status to running, completed (with the reply), or failed", async () => {
@@ -139,7 +172,7 @@ describe("HTTP API", () => {
       startQuestion: async () => { throw new Error("boom"); },
       getTaskRun: async () => { throw new ClientError("forbidden", 403); },
     });
-    const postRes = await post({ transcript });
+    const postRes = await post({ question });
     expect(postRes.status).toBe(500);
     expect(await postRes.text()).toBe("internal error");
     expect((await get(qid("r"))).status).toBe(500);
@@ -173,20 +206,12 @@ describe("loadEnv", () => {
   it("requires API_TOKEN, and RENDER_API_KEY unless running against local dev", () => {
     expect(() => loadEnv({ RENDER_API_KEY: "rk" })).toThrow();
     expect(() => loadEnv({ API_TOKEN: "tok" })).toThrow(/RENDER_API_KEY is required/);
-    expect(loadEnv({ API_TOKEN: "tok", RENDER_USE_LOCAL_DEV: "true" }).useLocalDev).toBe(true);
-    expect(loadEnv({ API_TOKEN: "tok", RENDER_LOCAL_DEV_URL: "http://localhost:8120" }).useLocalDev).toBe(true);
+    expect(loadEnv({ API_TOKEN: "tok", RENDER_LOCAL_DEV_URL: "http://localhost:8121" }).localDevUrl).toBe("http://localhost:8121");
   });
 
-  it("enables Slack only when both credentials are set, treating blank Dashboard values as unset", () => {
-    const base = { API_TOKEN: "tok", RENDER_API_KEY: "rk" };
-    expect(loadEnv({ ...base, SLACK_SIGNING_SECRET: "s", SLACK_BOT_TOKEN: "t" }).slackCredentials)
-      .toEqual({ signingSecret: "s", botToken: "t" });
-    expect(loadEnv({ ...base, SLACK_SIGNING_SECRET: "s" }).slackCredentials).toBeUndefined();
-
-    const blank = loadEnv({ ...base, SLACK_SIGNING_SECRET: "", SLACK_BOT_TOKEN: "", SLACK_CALLBACK_KEY: " ", RENDER_USE_LOCAL_DEV: "" });
-    expect(blank.slackCredentials).toBeUndefined();
-    expect(blank.slackCallbackKey).toBeUndefined();
-    expect(blank.useLocalDev).toBe(false);
-    expect(() => loadEnv({ ...base, RENDER_API_KEY: "" })).toThrow(/RENDER_API_KEY is required/);
+  it("treats blank Dashboard values as unset and derives the task slug from WORKFLOW_SLUG", () => {
+    expect(() => loadEnv({ API_TOKEN: "tok", RENDER_API_KEY: "", RENDER_LOCAL_DEV_URL: " " })).toThrow(/RENDER_API_KEY is required/);
+    expect(loadEnv({ API_TOKEN: "tok", RENDER_API_KEY: "rk" }).taskSlug).toBe("codebase-researcher-workflow/answer_question");
+    expect(loadEnv({ API_TOKEN: "tok", RENDER_API_KEY: "rk", WORKFLOW_SLUG: "my-wf" }).taskSlug).toBe("my-wf/answer_question");
   });
 });

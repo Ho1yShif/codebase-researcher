@@ -12,10 +12,5 @@ export default defineConfig({
   gitCredentials: {
     "github.com": { username: "x-access-token", tokenEnv: "GITHUB_TOKEN" },
   },
-  labels: {
-    owner: "Suggested owner",
-    escalation: "Question for engineering",
-    supportTeam: "the support team",
-  },
   snapshotName: "codebase-researcher-corpus",
 });

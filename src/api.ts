@@ -1,9 +1,8 @@
-import { ApiTranscript, QuestionMetadata, type Reply, type StartQuestion } from "./question.ts";
+import { MESSAGE_MAX_CHARS, Transcript, TRANSCRIPT_MAX_MESSAGES } from "./investigation.ts";
+import { QuestionMetadata, replyText, type Reply, type StartQuestion } from "./question.ts";
 import { present } from "./util.ts";
 import { safeEqual } from "./callback.ts";
 import { createLog, type Log } from "./log.ts";
-import { createSlack } from "./slack/client.ts";
-import { mountSlackRoutes } from "./slack/routes.ts";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { bearerAuth } from "hono/bearer-auth";
@@ -15,7 +14,8 @@ import { createHmac } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-export type GetTaskRun = (id: string) => Promise<{ status: string; results: unknown[]; error?: string }>;
+export type TaskRun = { status: string; input?: unknown; results: unknown[]; error?: string };
+export type GetTaskRun = (id: string) => Promise<TaskRun>;
 
 export type AppDeps = {
   apiToken: string;
@@ -43,7 +43,8 @@ export function fromQuestionId(apiToken: string, questionId: string): string | n
 
 const postBody = (isLocalDev: boolean) =>
   z.object({
-    transcript: ApiTranscript,
+    question: z.string().trim().min(1).max(MESSAGE_MAX_CHARS),
+    follow_up_to: z.string().min(1).optional(),
     callback: z.object({
       url: z.url().refine((raw) => {
         const url = new URL(raw);
@@ -55,9 +56,39 @@ const postBody = (isLocalDev: boolean) =>
     metadata: QuestionMetadata.optional(),
   });
 
+const httpError = (status: 400 | 404 | 409, error: string) =>
+  new HTTPException(status, { res: Response.json({ error }, { status }) });
+
+function completedReply(run: TaskRun): { trace_id?: string; reply?: Reply } | undefined {
+  if (run.status !== "succeeded" && run.status !== "completed") return undefined;
+  return (run.results?.[0] ?? {}) as { trace_id?: string; reply?: Reply };
+}
+
 export function createApp(deps: AppDeps) {
   const app = new Hono();
   const PostBody = postBody(deps.isLocalDev);
+
+  async function readRun(questionId: string): Promise<TaskRun> {
+    const runId = fromQuestionId(deps.apiToken, questionId);
+    if (!runId) throw httpError(404, "not found");
+    try {
+      return await deps.getTaskRun(runId);
+    } catch (err) {
+      if (err instanceof ClientError && err.statusCode === 404) throw httpError(404, "not found");
+      throw err;
+    }
+  }
+
+  /** The earlier question's conversation plus its reply, so a follow-up carries the whole exchange. */
+  async function conversationSoFar(questionId: string): Promise<Transcript> {
+    const run = await readRun(questionId);
+    const reply = completedReply(run)?.reply;
+    if (!reply) throw httpError(409, "follow_up_to has no reply yet: it is still running, or its run failed");
+    const input = Array.isArray(run.input) ? run.input[0] : undefined;
+    const earlier = Transcript.safeParse((input as { transcript?: unknown } | undefined)?.transcript);
+    if (!earlier.success) throw httpError(400, "follow_up_to is not a question this API can continue");
+    return [...earlier.data, { role: "agent", text: replyText(reply) }];
+  }
 
   app.onError((err, c) => {
     if (err instanceof HTTPException) return err.getResponse();
@@ -81,40 +112,31 @@ export function createApp(deps: AppDeps) {
       return parsed.success ? parsed.data : c.json({ error: z.prettifyError(parsed.error) }, 400);
     }),
     async (c) => {
-      const run = await deps.startQuestion(c.req.valid("json"), {
+      const { question, follow_up_to, callback, metadata } = c.req.valid("json");
+      const earlier = follow_up_to ? await conversationSoFar(follow_up_to) : [];
+      const transcript: Transcript = [...earlier, { role: "user", text: question }];
+      if (transcript.length > TRANSCRIPT_MAX_MESSAGES) {
+        throw httpError(400, `a conversation holds at most ${TRANSCRIPT_MAX_MESSAGES} messages; ask a new question instead`);
+      }
+      const run = await deps.startQuestion({ transcript, callback, metadata }, {
         idempotencyKey: c.req.header("idempotency-key"),
         signal: AbortSignal.timeout(5000),
       });
-      deps.log.info("task started", { event: "task_started", run_id: run.id });
+      deps.log.info("task started", { event: "task_started", run_id: run.id, follow_up: !!follow_up_to });
       return c.json({ id: toQuestionId(deps.apiToken, run.id) }, 202);
     },
   );
 
   app.get("/v1/questions/:id", async (c) => {
     const id = c.req.param("id");
-    const runId = fromQuestionId(deps.apiToken, id);
-    if (!runId) return c.json({ error: "not found" }, 404);
-
-    let run: Awaited<ReturnType<GetTaskRun>>;
-    try {
-      run = await deps.getTaskRun(runId);
-    } catch (err) {
-      if (err instanceof ClientError && err.statusCode === 404) return c.json({ error: "not found" }, 404);
-      throw err;
-    }
-
+    const run = await readRun(id);
     const status = run.status;
     if (status === "pending" || status === "running" || status === "paused") {
       return c.json({ id, status: "running" });
     }
-    if (status === "succeeded" || status === "completed") {
-      const result = run.results?.[0] as { trace_id?: string; reply?: Reply } | undefined;
-      return c.json({
-        id,
-        status: "completed",
-        trace_id: result?.trace_id,
-        reply: result?.reply,
-      });
+    const result = completedReply(run);
+    if (result) {
+      return c.json({ id, status: "completed", trace_id: result.trace_id, reply: result.reply });
     }
     // failed or canceled
     return c.json({ id, status: "failed", error: run.error ?? "task failed" });
@@ -128,46 +150,19 @@ const Env = z
     PORT: z.coerce.number().int().positive().default(3000),
     API_TOKEN: z.string().min(1, "API_TOKEN is required"),
     RENDER_API_KEY: z.string().min(1).optional(),
-    RENDER_USE_LOCAL_DEV: z.stringbool().default(false),
     RENDER_LOCAL_DEV_URL: z.string().min(1).optional(),
-    WORKFLOW_SLUG: z.string().optional(),
-    WORKFLOW_TASK_SLUG: z.string().optional(),
-    // Slack adapter (optional)
-    SLACK_SIGNING_SECRET: z.string().min(1).optional(),
-    SLACK_BOT_TOKEN: z.string().min(1).optional(),
-    ALLOWED_CHANNEL_IDS: z.string().min(1).optional(),
-    SLACK_CALLBACK_KEY: z.string().min(1).optional(),
-    SLACK_API_URL: z.string().min(1).optional(),
-    PUBLIC_URL: z.string().min(1).optional(),
-    RENDER_EXTERNAL_URL: z.string().min(1).optional(),
+    WORKFLOW_SLUG: z.string().min(1).default("codebase-researcher-workflow"),
   })
-  .transform((e) => {
-    const useLocalDev = !!e.RENDER_LOCAL_DEV_URL || e.RENDER_USE_LOCAL_DEV;
-    const defaultSlug = "codebase-researcher-workflow";
-    const taskSlug = e.WORKFLOW_TASK_SLUG ?? `${e.WORKFLOW_SLUG ?? defaultSlug}/answer_question`;
-    const slackCredentials = e.SLACK_SIGNING_SECRET && e.SLACK_BOT_TOKEN
-      ? { signingSecret: e.SLACK_SIGNING_SECRET, botToken: e.SLACK_BOT_TOKEN }
-      : undefined;
-    const allowedChannels: Set<string> | "*" = e.ALLOWED_CHANNEL_IDS === "*"
-      ? "*"
-      : new Set((e.ALLOWED_CHANNEL_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean));
-    return {
-      port: e.PORT,
-      apiToken: e.API_TOKEN,
-      renderApiKey: e.RENDER_API_KEY,
-      useLocalDev,
-      localDevUrl: e.RENDER_LOCAL_DEV_URL,
-      taskSlug,
-      slackCredentials,
-      allowedChannels,
-      slackCallbackKey: e.SLACK_CALLBACK_KEY,
-      slackApiUrl: e.SLACK_API_URL,
-      publicUrl: e.PUBLIC_URL ?? e.RENDER_EXTERNAL_URL,
-    };
+  .refine((e) => e.RENDER_LOCAL_DEV_URL || e.RENDER_API_KEY, {
+    message: "RENDER_API_KEY is required unless RENDER_LOCAL_DEV_URL is set",
   })
-  .refine((c) => c.useLocalDev || c.renderApiKey, {
-    message: "RENDER_API_KEY is required unless RENDER_USE_LOCAL_DEV or RENDER_LOCAL_DEV_URL is set",
-  });
+  .transform((e) => ({
+    port: e.PORT,
+    apiToken: e.API_TOKEN,
+    renderApiKey: e.RENDER_API_KEY,
+    localDevUrl: e.RENDER_LOCAL_DEV_URL,
+    taskSlug: `${e.WORKFLOW_SLUG}/answer_question`,
+  }));
 
 export type ApiConfig = z.output<typeof Env>;
 
@@ -179,11 +174,9 @@ export function loadEnv(env: NodeJS.ProcessEnv = process.env): ApiConfig {
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const env = loadEnv();
 
-  const renderOpts: ConstructorParameters<typeof Render>[0] = env.useLocalDev
-    ? { useLocalDev: true, ...(env.localDevUrl && { localDevUrl: env.localDevUrl }) }
-    : { token: env.renderApiKey };
-
-  const render = new Render(renderOpts);
+  const render = new Render(
+    env.localDevUrl ? { useLocalDev: true, localDevUrl: env.localDevUrl } : { token: env.renderApiKey },
+  );
 
   const startQuestion: StartQuestion = async (input, opts) => {
     const run = await render.workflows.startTask(
@@ -202,25 +195,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     apiToken: env.apiToken,
     startQuestion,
     getTaskRun,
-    isLocalDev: env.useLocalDev,
+    isLocalDev: !!env.localDevUrl,
     log,
   });
-
-  if (env.slackCredentials) {
-    const publicUrl = env.publicUrl;
-    if (!publicUrl) {
-      log.warn("slack disabled", { event: "slack_disabled", reason: "PUBLIC_URL or RENDER_EXTERNAL_URL is required for Slack" });
-    } else {
-      mountSlackRoutes(app, {
-        signingSecret: env.slackCredentials.signingSecret,
-        allowedChannels: env.allowedChannels,
-        callbackKey: env.slackCallbackKey ?? env.apiToken,
-        publicUrl: publicUrl.replace(/\/$/, ""),
-        slack: createSlack(env.slackCredentials.botToken, env.slackApiUrl),
-      }, { startQuestion, log });
-      log.info("slack enabled", { event: "slack_enabled" });
-    }
-  }
 
   const server = serve({ fetch: app.fetch, port: env.port, hostname: "0.0.0.0" }, (info) => {
     log.info("listening", { event: "listening", port: info.port });

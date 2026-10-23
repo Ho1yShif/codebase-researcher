@@ -31,12 +31,12 @@ const call = (name: string, args: Record<string, unknown>, note?: string) =>
 /**
  * Deterministic `--faux` run that exercises the real tools against the real checkouts: list the repos root,
  * read git history and a real file from the first manifest repository, then submit a citation of that file.
- * A latest human message containing "clarify" gets needs_clarification instead (for two-turn tests).
+ * A latest user message containing "clarify" gets needs_clarification instead (for two-turn tests).
  */
 export const defaultFauxScript: FauxScript = (input) => {
   const ls = call("ls", { path: input.repos_root }, "[faux] Listing the repositories root.");
-  const latestHuman = input.transcript.findLast((m) => !m.is_agent);
-  if (/\bclarify\b/i.test(latestHuman?.text ?? "")) {
+  const latestUser = input.transcript.findLast((m) => m.role === "user");
+  if (/\bclarify\b/i.test(latestUser?.text ?? "")) {
     return [
       ls,
       call(SUBMIT_TOOL, {

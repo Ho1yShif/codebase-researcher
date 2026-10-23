@@ -9,8 +9,9 @@ customization use [1_EXTENSION.md](1_EXTENSION.md).
 
 The Blueprint in [`render.yaml`](../render.yaml) creates three services:
 
-- **API** (`codebase-researcher-api`) accepts HTTP questions and optional
-  Slack events. It starts durable workflow runs and returns immediately.
+- **API** (`codebase-researcher-api`) accepts HTTP questions, rebuilds the
+  conversation for follow-ups, starts durable workflow runs, and serves their
+  results. It holds no state of its own.
 - **Workflow** (`codebase-researcher-workflow`) orchestrates each question,
   restores a fresh Sandbox, runs the agent inside it, validates the result,
   and optionally delivers a callback.
@@ -19,7 +20,7 @@ The Blueprint in [`render.yaml`](../render.yaml) creates three services:
 
 ```mermaid
 flowchart LR
-  caller[HTTP caller or Slack] --> api[API service]
+  caller[HTTP caller or pnpm ask] --> api[API service]
   api -->|start answer_question| workflow[Workflow service]
   workflow --> investigate[investigate subtask]
   investigate -->|restore by name| sandbox[Fresh investigation Sandbox]
@@ -40,31 +41,27 @@ cleanup.
 ## Directory overview
 
 ```text
-config.ts                     Instance name, repositories, Git credentials, labels, snapshot name
+config.ts                     Instance name, repositories, Git credentials, snapshot name
 prompt.md                     Instance-specific agent instructions
 render.yaml                   Blueprint for the API, workflow, and cron
 .env.example                  Environment variable reference
 docs/
-  0_QUICKSTART.md             Deploy, ask, connect Slack, develop, operate
-  1_EXTENSION.md              Corpus, model, agent, API, and channel extension points
+  0_QUICKSTART.md             Deploy, ask, follow up, develop, operate
+  1_EXTENSION.md              Corpus, model, agent, API, and integration extension points
   2_ARCHITECTURE.md           Repository map, execution paths, interfaces
   3_TAKEAWAYS.md              Reusable agent and Sandbox patterns
 src/
-  api.ts                      Hono API, question polling, Slack route mounting
+  api.ts                      Hono API: start, follow up, and poll questions
+  ask.ts                      `pnpm ask` client: post, poll, print the reply
   workflow.ts                 Workflow task registration, retries, timeout budgets
   tasks.ts                    Parent, investigation, and delivery task bodies
   cron.ts                     Scheduled snapshot refresh entry point
   question.ts                 Public question, callback, metadata, and Reply contracts
-  investigation.ts            Agent result, evidence, transcript, evidence URL contracts
+  investigation.ts            Transcript, agent result, evidence, evidence URL contracts
   manifest.ts                 Configured repository profile and resolved Sandbox manifest
   bot-config.ts               config.ts validation and environment overrides
   callback.ts                 Callback HMAC signing and verification
   log.ts                      Structured JSON logger
-  slack/
-    routes.ts                 Event acknowledgement and callback routes
-    transcript.ts             Slack thread to bounded question transcript
-    format.ts                 Safe Block Kit rendering
-    events.ts, client.ts      Signature parsing and Slack API wrapper
   sandbox/
     interface.ts              Provider-neutral Sandbox and OpenSandbox contracts
     index.ts                  Render/local provider selection
@@ -126,14 +123,19 @@ the underlying snapshot without coordinating with active workflow runs.
 
 `POST /v1/questions` in [`src/api.ts`](../src/api.ts):
 
-1. Authenticates `API_TOKEN` and validates `AnswerQuestionInput`.
-2. Starts `answer_question`, forwarding an optional idempotency key.
-3. Returns a signed question ID. `GET /v1/questions/:id` verifies that
+1. Authenticates `API_TOKEN` and validates the body: a `question`, plus an
+   optional `follow_up_to`, callback, and metadata.
+2. Builds the transcript. A new question is one `user` message. A follow-up
+   verifies the earlier question ID, reads that workflow run, and takes its
+   input transcript, then its reply as an `agent` message, then the new
+   question.
+3. Starts `answer_question` with `AnswerQuestionInput`, forwarding an
+   optional idempotency key.
+4. Returns a signed question ID. `GET /v1/questions/:id` verifies that
    signature before reading the workflow run.
 
-The Slack adapter reaches the same `StartQuestion` function without an HTTP
-hop. It acknowledges Slack before reading the thread or calling Render, then
-uses Slack's event ID as the idempotency key.
+The API has no database. Each workflow run stores the full conversation it
+answered, so a chain of follow-ups only ever reads the latest run.
 
 ### 3. Orchestrate the workflow
 
@@ -221,21 +223,23 @@ reply in a signed callback.
 
 ### Public question contract
 
-[`src/question.ts`](../src/question.ts) is the boundary for API and channel
-callers:
+[`src/question.ts`](../src/question.ts) is the boundary between the API and
+the workflow:
 
 - `AnswerQuestionInput`: transcript, optional callback, optional metadata.
-- `StartQuestion`: shared function used by HTTP and Slack.
+- `StartQuestion`: how the API starts a run; tests replace it with a fake.
 - `Reply`: answer, clarification, or failure.
-- `MESSAGE_MAX_CHARS` and `TRANSCRIPT_MAX_MESSAGES`: adapter fitting limits.
+- `replyText`: a reply rendered as the agent's turn in a follow-up.
 
-Channel-specific concepts stop at this boundary.
+HTTP concerns such as auth, question IDs, and `follow_up_to` stop at the API.
+The workflow receives only a complete transcript.
 
 ### Investigation contract
 
 [`src/investigation.ts`](../src/investigation.ts) defines:
 
-- the normalized internal transcript;
+- the transcript: oldest-first `{ role: "user" | "agent", text }` messages,
+  with `MESSAGE_MAX_CHARS` and `TRANSCRIPT_MAX_MESSAGES` limits;
 - `FinalAnswer` and `NeedsClarification`;
 - `Evidence`, including repository, commit, path, and line range;
 - `buildEvidenceUrl`, called only after validation.
