@@ -18,11 +18,6 @@ export const BotConfig = z.object({
   name: z.string().min(1),
   repos: RepoProfile.shape.repos,
   gitCredentials: HostCredentials.optional().default(DEFAULT_CREDENTIALS),
-  labels: z.object({
-    owner: z.string().min(1),
-    escalation: z.string().min(1),
-    supportTeam: z.string().min(1),
-  }),
   snapshotName: z.string().min(1).default("codebase-researcher-corpus"),
 });
 export type BotConfig = z.infer<typeof BotConfig>;

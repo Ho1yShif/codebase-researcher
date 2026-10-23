@@ -39,16 +39,13 @@ export function loadLocalConfig(env: NodeJS.ProcessEnv = process.env): LocalConf
   const e = z
     .object({
       LOCAL_REPOS_ROOT: z.string().default(join(REPO_ROOT, ".scratch/repos")),
-      LOCAL_SANDBOXES_ROOT: z.string().default(join(REPO_ROOT, ".scratch/sandboxes")),
-      LOCAL_RUNNER_CMD: z.string().optional(),
       LOCAL_RUNNER_ARGS: z.string().optional(),
     })
     .parse(present(env));
   return {
     profile: { name: config.name, repos: config.repos },
     reposRoot: e.LOCAL_REPOS_ROOT,
-    sandboxesRoot: e.LOCAL_SANDBOXES_ROOT,
-    runnerCmd: e.LOCAL_RUNNER_CMD,
+    sandboxesRoot: join(REPO_ROOT, ".scratch/sandboxes"),
     runnerArgs: e.LOCAL_RUNNER_ARGS,
   };
 }
@@ -56,7 +53,7 @@ export function loadLocalConfig(env: NodeJS.ProcessEnv = process.env): LocalConf
 const KILL_AFTER_MS = 10_000;
 /** What coreutils `timeout` exits with; the Render sandbox reports the same status on deadline. */
 const TIMEOUT_EXIT = 124;
-const SECRET_ENV = /^(DATABASE_URL.*|RENDER_API_KEY|.*_TOKEN|SLACK_.*)$/;
+const SECRET_ENV = /^(DATABASE_URL.*|RENDER_API_KEY|.*_TOKEN)$/;
 /** Read-only inspection flags: never trust repo-local config that could execute commands as the checker. */
 const SAFE_GIT = ["-c", "safe.directory=*", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
 

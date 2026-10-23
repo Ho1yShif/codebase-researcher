@@ -1,13 +1,13 @@
 import { z } from "zod";
+import { AnswerQuestionInput, type Callback, type Reply } from "./question.ts";
 import {
-  AnswerQuestionInput,
+  buildEvidenceUrl,
   MESSAGE_MAX_CHARS,
   TRANSCRIPT_MAX_MESSAGES,
-  toInternalTranscript,
-  type Callback,
-  type Reply,
-} from "./question.ts";
-import { buildEvidenceUrl, type Evidence, type InvestigationResult, type Transcript } from "./investigation.ts";
+  type Evidence,
+  type InvestigationResult,
+  type Transcript,
+} from "./investigation.ts";
 import type { RepoManifest } from "./manifest.ts";
 import { RUNNER_EXIT, RunnerInput, type RunnerEvent, type Usage } from "./runner/protocol.ts";
 import { SnapshotUnavailableError, type OpenSandbox, type RunInvestigationResult, type Sandbox } from "./sandbox/index.ts";
@@ -116,7 +116,7 @@ export function failureReason(code: FailureCode, agentTimeoutMs: number): string
         "snapshot expired. Try again in a few minutes; if this keeps happening, an operator should check the snapshot cron's logs"
       );
     case "invalid_question":
-      return `the question couldn't be read (at most ${TRANSCRIPT_MAX_MESSAGES} messages of up to ${MESSAGE_MAX_CHARS} characters each)`;
+      return `the question couldn't be read (a conversation holds at most ${TRANSCRIPT_MAX_MESSAGES} messages of up to ${MESSAGE_MAX_CHARS} characters each)`;
   }
 }
 
@@ -178,7 +178,7 @@ export async function answerQuestion(
   const started = Date.now();
 
   const parsed = AnswerQuestionInput.safeParse(rawInput);
-  // Without a reply, a caller waiting on its callback (a Slack thread) would wait forever.
+  // Without a reply, a caller waiting on its callback would wait forever.
   const input: z.infer<typeof DeliveryInput> = parsed.success ? parsed.data : DeliveryInput.safeParse(rawInput).data ?? {};
 
   let investigateResult: InvestigateResult;
@@ -187,7 +187,7 @@ export async function answerQuestion(
     investigateResult = { kind: "failed", code: "invalid_question" };
   } else {
     try {
-      investigateResult = await deps.runInvestigate({ transcript: toInternalTranscript(parsed.data.transcript), trace_id: traceId });
+      investigateResult = await deps.runInvestigate({ transcript: parsed.data.transcript, trace_id: traceId });
     } catch (err) {
       log.error("investigation failed", { trace_id: traceId, err });
       investigateResult = { kind: "failed", code: "retries_exhausted" };

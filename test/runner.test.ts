@@ -49,8 +49,8 @@ describe("bundled runner CLI", { timeout: 30_000 }, () => {
       ...first,
       transcript: [
         ...first.transcript,
-        { ts: "1727800001.000100", user_id: null, is_agent: true, text: "Which service type?" },
-        { ts: "1727800002.000100", user_id: "U123", is_agent: false, text: "Web services in Oregon." },
+        { role: "agent", text: "Which service type?" },
+        { role: "user", text: "Web services in Oregon." },
       ],
     };
     const end2 = terminal(parseEvents(runCli(["--faux"], JSON.stringify(second)).stdout));

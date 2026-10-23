@@ -36,7 +36,7 @@ async function commitAll(path: string, message: string): Promise<string> {
 export function runnerInput(layout: { reposRoot: string; scratchDir: string }, model = "fake-model"): RunnerInput {
   return {
     trace_id: "test-trace-00001",
-    transcript: [{ ts: "1.0", user_id: "U1", is_agent: false, text: "does X happen?" }],
+    transcript: [{ role: "user", text: "does X happen?" }],
     manifest: {
       profile: "test",
       created_at: new Date().toISOString(),
@@ -111,7 +111,7 @@ export function makeFixture(): Fixture {
 export function makeInput(fx: Fixture, overrides: { text?: string; timeout_ms?: number } = {}): RunnerInput {
   return {
     trace_id: randomUUID(),
-    transcript: [{ ts: "1727800000.000100", user_id: "U123", is_agent: false, text: overrides.text ?? "How long is the max retry delay?" }],
+    transcript: [{ role: "user", text: overrides.text ?? "How long is the max retry delay?" }],
     manifest: {
       profile: "test",
       created_at: new Date().toISOString(),

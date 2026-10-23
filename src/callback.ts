@@ -1,6 +1,6 @@
-// Used by the workflow's `deliver` subtask (signs) and by callback receivers
-// like /slack/deliver (verifies). Note: callback secrets travel in task input,
-// which is visible in the Render Dashboard.
+// Used by the workflow's `deliver` subtask (signs) and by TypeScript callback
+// receivers (verifies). Note: callback secrets travel in task input, which is
+// visible in the Render Dashboard.
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 

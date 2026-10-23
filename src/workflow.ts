@@ -64,23 +64,18 @@ export function parentTimeoutSeconds(env: NodeJS.ProcessEnv = process.env): numb
 const Env = z
   .looseObject({
     MODEL_PROVIDER: z.string().min(1).default("anthropic"),
-    MODEL: z.string().min(1).optional(),
-    PI_MODEL: z.string().min(1).optional(),
-    PI_THINKING_LEVEL: RunnerInput.shape.thinking_level,
-    MODEL_API_KEY: z.string().min(1).optional(),
+    MODEL: z.string().min(1).default("claude-opus-5"),
+    THINKING_LEVEL: RunnerInput.shape.thinking_level,
     ...timeouts,
   })
   .transform((e) => {
     const env = e as Record<string, string | undefined>;
-    const modelProvider = e.MODEL_PROVIDER;
-    const model = e.MODEL ?? e.PI_MODEL ?? "claude-opus-5";
-    const modelApiKey = e.MODEL_API_KEY ?? providerApiKey(modelProvider, env);
     return {
       snapshotName: botConfig.snapshotName,
-      modelProvider,
-      model,
-      thinkingLevel: e.PI_THINKING_LEVEL,
-      modelApiKey,
+      modelProvider: e.MODEL_PROVIDER,
+      model: e.MODEL,
+      thinkingLevel: e.THINKING_LEVEL,
+      modelApiKey: providerApiKey(e.MODEL_PROVIDER, env),
       agentTimeoutMs: e.AGENT_TIMEOUT_MS,
       sandboxProvisionTimeoutMs: e.SANDBOX_PROVISION_TIMEOUT_MS,
     };

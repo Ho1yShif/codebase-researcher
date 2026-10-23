@@ -23,6 +23,11 @@ export type RenderConfig = {
 
 const positiveInt = (def: number) => z.coerce.number().int().positive().default(def);
 
+/** Provider-side backstop for a builder whose cron process died before terminating it. */
+const BUILDER_TIMEOUT_SECONDS = 3_600;
+/** Sandbox API calls share a 100 requests/minute workspace limit. */
+const MIN_REQUEST_INTERVAL_MS = 1_000;
+
 export async function loadRenderConfig(
   env: NodeJS.ProcessEnv = process.env,
   derivedAllowedDomain?: string,
@@ -35,8 +40,6 @@ export async function loadRenderConfig(
       SANDBOX_NETWORK_POLICY: z.enum(["allow-list", "allow-all", "deny-all"]).default("allow-list"),
       SANDBOX_ALLOWED_DOMAINS: z.string().optional(),
       SANDBOX_TIMEOUT_SECONDS: positiveInt(1_800).pipe(z.number().max(86_400)),
-      SANDBOX_BUILDER_TIMEOUT_SECONDS: positiveInt(3_600).pipe(z.number().max(86_400)),
-      RENDER_API_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(1_000),
     })
     .parse(present(env));
   const explicit = e.SANDBOX_ALLOWED_DOMAINS
@@ -58,8 +61,8 @@ export async function loadRenderConfig(
         ? { type: "allow-list", rules: domains.map((domain) => ({ domain, protocol: "https" })) }
         : { type: e.SANDBOX_NETWORK_POLICY },
     investigationTimeoutSeconds: e.SANDBOX_TIMEOUT_SECONDS,
-    builderTimeoutSeconds: e.SANDBOX_BUILDER_TIMEOUT_SECONDS,
-    minRequestIntervalMs: e.RENDER_API_MIN_INTERVAL_MS,
+    builderTimeoutSeconds: BUILDER_TIMEOUT_SECONDS,
+    minRequestIntervalMs: MIN_REQUEST_INTERVAL_MS,
     sandboxDir: join(REPO_ROOT, "sandbox"),
   };
 }

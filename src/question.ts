@@ -1,29 +1,5 @@
 import { z } from "zod";
-import type { FinalAnswer, NeedsClarification, Transcript } from "./investigation.ts";
-
-export const MESSAGE_MAX_CHARS = 8000;
-export const TRANSCRIPT_MAX_MESSAGES = 200;
-
-export const ApiTranscriptMessage = z.object({
-  text: z.string().max(MESSAGE_MAX_CHARS),
-  author: z.string().optional(),
-  is_agent: z.boolean().optional(),
-});
-export type ApiTranscriptMessage = z.infer<typeof ApiTranscriptMessage>;
-
-/** The public transcript shape accepted by POST /v1/questions. */
-export const ApiTranscript = z.array(ApiTranscriptMessage).min(1).max(TRANSCRIPT_MAX_MESSAGES);
-export type ApiTranscript = z.infer<typeof ApiTranscript>;
-
-/** Convert the public transcript shape to the internal one the runner expects. */
-export function toInternalTranscript(api: ApiTranscript): Transcript {
-  return api.map((m, i) => ({
-    ts: String(i),
-    user_id: m.author ?? null,
-    is_agent: m.is_agent ?? false,
-    text: m.text,
-  }));
-}
+import { MESSAGE_MAX_CHARS, Transcript, type FinalAnswer, type NeedsClarification } from "./investigation.ts";
 
 export const Callback = z.object({
   url: z.string(),
@@ -37,16 +13,16 @@ export const QuestionMetadata = z.record(
 ).refine((r) => Object.keys(r).length <= 16, "metadata may have at most 16 keys");
 export type QuestionMetadata = z.infer<typeof QuestionMetadata>;
 
+/** The `answer_question` workflow input. The API builds the transcript from a question and, for a follow-up, the earlier run. */
 export const AnswerQuestionInput = z.object({
-  transcript: ApiTranscript,
+  transcript: Transcript,
   callback: Callback.optional(),
   metadata: QuestionMetadata.optional(),
 });
 export type AnswerQuestionInput = z.infer<typeof AnswerQuestionInput>;
 
-/** Starts an `answer_question` run; shared by the HTTP API and the Slack adapter. */
 export type StartQuestion = (
-  input: { transcript: ApiTranscript; callback?: Callback; metadata?: QuestionMetadata },
+  input: AnswerQuestionInput,
   opts: { idempotencyKey?: string; signal: AbortSignal },
 ) => Promise<{ id: string }>;
 
@@ -55,3 +31,23 @@ export type Reply =
   | { kind: "answer"; traceId: string; result: FinalAnswer; model?: string; manifestCreatedAt?: string }
   | { kind: "clarification"; traceId: string; result: NeedsClarification }
   | { kind: "failure"; traceId: string; reason: string };
+
+/** The agent's turn in a follow-up's transcript: what the asker saw, plus the citations behind an answer. */
+export function replyText(reply: Reply): string {
+  let text: string;
+  switch (reply.kind) {
+    case "answer":
+      text = [
+        reply.result.answer,
+        ...reply.result.evidence.map((e) => `- ${e.repository}@${e.commit.slice(0, 12)} ${e.path}:${e.start_line}-${e.end_line}`),
+      ].join("\n");
+      break;
+    case "clarification":
+      text = reply.result.question;
+      break;
+    case "failure":
+      text = `I couldn't complete this investigation: ${reply.reason}.`;
+      break;
+  }
+  return text.slice(0, MESSAGE_MAX_CHARS);
+}

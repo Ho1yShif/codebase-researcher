@@ -220,47 +220,28 @@ Classify failures deliberately:
 Implementation: `classifyRun` and `failureReason` in
 [`src/tasks.ts`](../src/tasks.ts).
 
-## Keep channels as adapters
+## Make the workflow run the record
 
-The durable unit is a question: transcript, callback, and routing metadata.
-Slack-specific signatures, thread reads, reactions, and formatting stay in
-the Slack adapter.
+The API stores nothing. Each `answer_question` run's input holds the whole
+conversation it answered, and its result holds the reply, so the run is both
+the job and the database row:
 
-For any webhook-driven channel:
+- a signed question ID lets the API read back only the runs it started;
+- a follow-up reads the earlier run's transcript and reply, appends the new
+  question, and starts a new run, so a chain of follow-ups never needs more
+  than the latest ID;
+- polling and callbacks return the same stored reply.
+
+Keep integrations such as chat bots and support desks outside, as clients of
+the HTTP API. For any webhook-driven integration:
 
 - acknowledge before slow work;
-- use the platform event ID as an idempotency key;
-- derive a per-event callback secret;
-- make callback delivery idempotent;
-- escape model text and suppress mentions;
-- keep platform limits out of the core investigation.
+- use the platform event ID as the idempotency key;
+- store the latest question ID per thread and send it as `follow_up_to`;
+- derive a per-event callback secret and verify callbacks against the raw body;
+- make callback handling idempotent;
+- escape model text and suppress mentions.
 
-Implementation: [`src/question.ts`](../src/question.ts) and
-[`src/slack/`](../src/slack).
-
-## Preserve a deterministic path without a model
-
-`--faux` drives the real tools, event protocol, submission validator, and
-workflow with scripted model behavior. This separates pipeline failures from
-provider behavior and keeps end-to-end tests cheap and repeatable.
-
-Agent systems benefit from a deterministic mode that crosses every boundary
-except the nondeterministic model call.
-
-Implementation: [`src/runner/faux.ts`](../src/runner/faux.ts) and
-[`test/runner.test.ts`](../test/runner.test.ts).
-
-## State residual risks explicitly
-
-Layered controls reduce risk; they do not make arbitrary agent execution
-perfectly safe.
-
-This project documents three accepted residual risks:
-
-- DNS resolves arbitrary names, permitting low-bandwidth exfiltration.
-- The allowed model-provider host is shared and cannot distinguish accounts.
-- Anyone permitted to ask can retrieve content from any configured repository.
-
-Write residual risks next to the controls, explain why they are accepted, and
-name the architectural change that would close each one. That makes future
-hardening a conscious decision rather than an assumption.
+Implementation: [`src/api.ts`](../src/api.ts),
+[`src/question.ts`](../src/question.ts), and
+[`src/ask.ts`](../src/ask.ts).

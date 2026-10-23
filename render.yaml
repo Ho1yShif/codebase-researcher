@@ -1,6 +1,5 @@
-# One project with three services: the HTTP API (and optional Slack endpoint), the answer_question
-# workflow, and the snapshot refresh cron. Region is oregon because Sandboxes early access runs only
-# there. No database.
+# One project with three services: the HTTP API, the answer_question workflow, and the snapshot
+# refresh cron. Region is oregon because Sandboxes early access runs only there. No database.
 #
 # Every secret is declared on the service that uses it, not in an env group: the Blueprint form
 # doesn't reliably prompt for sync: false values inside env groups. A value left blank counts as unset.
@@ -14,25 +13,18 @@ projects:
             name: codebase-researcher-api
             runtime: node
             region: oregon
-            # Paid instance: a free instance spins down and misses Slack's 3-second deadline.
-            plan: starter
+            # Free is enough: it spins down when idle, so the first request afterward waits for a cold start,
+            # but questions run in the workflow, not here. Use starter to keep it warm.
+            plan: free
             buildCommand: pnpm install --frozen-lockfile
             startCommand: pnpm start:api
             healthCheckPath: /healthz
             buildFilter:
-              paths: [src/api.ts, src/slack/**, src/question.ts, src/investigation.ts, src/bot-config.ts, src/manifest.ts, src/callback.ts, src/log.ts, src/util.ts, config.ts, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version, tsconfig.json]
+              paths: [src/api.ts, src/question.ts, src/investigation.ts, src/callback.ts, src/log.ts, src/util.ts, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version, tsconfig.json]
             envVars:
               - key: RENDER_API_KEY
                 sync: false
               - key: API_TOKEN
-                generateValue: true
-              - key: SLACK_SIGNING_SECRET
-                sync: false
-              - key: SLACK_BOT_TOKEN
-                sync: false
-              - key: ALLOWED_CHANNEL_IDS
-                sync: false
-              - key: SLACK_CALLBACK_KEY
                 generateValue: true
               - key: WORKFLOW_SLUG
                 fromService:
@@ -54,8 +46,6 @@ projects:
               - key: RENDER_WORKSPACE_ID
                 # Optional when the key can see exactly one workspace.
                 sync: false
-              - key: SANDBOX_PROVIDER
-                value: render
               - key: MODEL_PROVIDER
                 value: anthropic
               - key: MODEL

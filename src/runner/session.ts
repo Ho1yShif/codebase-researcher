@@ -21,10 +21,7 @@ export const SUBMIT_REMINDER =
 
 export function renderUserPrompt(input: RunnerInput): string {
   const repos = input.manifest.repos.map((r) => `| ${r.repository} | ${r.branch} | ${r.commit} |`);
-  const transcript = input.transcript.map((m) => {
-    const who = m.is_agent ? "[agent]" : `[user ${m.user_id ?? "unknown"}]`;
-    return `${who} (ts ${m.ts})\n${m.text}`;
-  });
+  const transcript = input.transcript.map((m) => `[${m.role}]\n${m.text}`);
   return [
     `Repositories root: ${input.repos_root}`,
     `Each repository is a read-only checkout at ${input.repos_root}/<owner>/<name>.`,
@@ -40,7 +37,7 @@ export function renderUserPrompt(input: RunnerInput): string {
     "",
     transcript.join("\n\n"),
     "",
-    `The question for this turn is the most recent human message. Investigate, then call ${SUBMIT_TOOL} exactly once.`,
+    `The question for this turn is the most recent [user] message. Investigate, then call ${SUBMIT_TOOL} exactly once.`,
   ].join("\n");
 }
 
