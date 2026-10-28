@@ -8,6 +8,7 @@ export default defineConfig({
     { repository: "render-oss/cli" },
     { repository: "render-oss/sdk" },
     { repository: "render-oss/skills" },
+    { repository: "ho1yshif/sandbox" },
   ],
   gitCredentials: {
     "github.com": { username: "x-access-token", tokenEnv: "GITHUB_TOKEN" },
